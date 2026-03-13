@@ -9,7 +9,6 @@ import json
 import imageio_ffmpeg
 import cv2
 from PIL import Image, ImageTk, ImageDraw, ImageFont
-import numpy as np
 
 class WatermarkApp:
     def __init__(self, root):
