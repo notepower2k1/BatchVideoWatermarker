@@ -4,6 +4,7 @@ import threading
 import subprocess
 import os
 import time
+import sys
 import imageio_ffmpeg
 import cv2
 from PIL import Image, ImageTk, ImageDraw, ImageFont
@@ -20,6 +21,7 @@ class WatermarkApp:
         
         self.video_files = []
         self.watermark_file = ""
+        self.bgm_file = ""
         self.output_dir = ""
         self.custom_x_ratio = 0.0
         self.custom_y_ratio = 0.0
@@ -31,6 +33,9 @@ class WatermarkApp:
         self.video_cap = None
         self.is_playing = False
         self.play_job = None
+        
+        self.mute_var = tk.BooleanVar(value=False)
+        self.opacity_var = tk.DoubleVar(value=100)
         
         # UI Elements
         self.setup_ui()
@@ -56,7 +61,7 @@ class WatermarkApp:
         
         list_frame = tk.Frame(frame_videos)
         list_frame.pack(fill="x", expand=True)
-        self.listbox_videos = tk.Listbox(list_frame, selectmode=tk.EXTENDED, height=6, exportselection=False)
+        self.listbox_videos = tk.Listbox(list_frame, selectmode=tk.BROWSE, height=6, exportselection=False)
         self.listbox_videos.pack(side="left", fill="x", expand=True)
         scrollbar = tk.Scrollbar(list_frame, orient="vertical", command=self.listbox_videos.yview)
         scrollbar.pack(side="right", fill="y")
@@ -119,8 +124,22 @@ class WatermarkApp:
         # Clear Watermark Button
         ttk.Button(frame_watermark, text="X Clear Watermark", command=self.clear_watermark_selection).pack(fill="x", padx=5, pady=(5, 0))
 
-        # 3. Settings
-        frame_settings = tk.LabelFrame(self.sidebar_frame, text="3. Processing Settings", padx=10, pady=10)
+        # 3. Audio Settings
+        frame_audio = tk.LabelFrame(self.sidebar_frame, text="3. Audio (Optional)", padx=10, pady=10)
+        frame_audio.pack(fill="x", pady=(0, 10))
+        
+        self.lbl_bgm = tk.Label(frame_audio, text="Original audio will be kept", fg="gray", anchor="w", wraplength=300, justify="left")
+        self.lbl_bgm.pack(fill="x", pady=(0, 5))
+        
+        btn_frame_bgm = tk.Frame(frame_audio)
+        btn_frame_bgm.pack(fill="x")
+        ttk.Button(btn_frame_bgm, text="Browse Music", command=self.select_bgm).pack(side="left", fill="x", expand=True, padx=(0, 2))
+        ttk.Button(btn_frame_bgm, text="X Clear", command=self.clear_bgm, width=8).pack(side="left", padx=(2, 0))
+
+        tk.Checkbutton(frame_audio, text="Mute Original Audio", variable=self.mute_var).pack(anchor="w", pady=(5, 0))
+
+        # 4. Processing Settings
+        frame_settings = tk.LabelFrame(self.sidebar_frame, text="4. Processing Settings", padx=10, pady=10)
         frame_settings.pack(fill="x", pady=(0, 10))
         
         # Grid layout for settings
@@ -131,27 +150,38 @@ class WatermarkApp:
         dropdown.grid(row=0, column=1, sticky="ew", padx=(5,0), pady=2)
         dropdown.bind("<<ComboboxSelected>>", self.on_position_changed)
         
-        ttk.Label(frame_settings, text="Scale (%):").grid(row=1, column=0, sticky="w", pady=2)
-        self.scale_var = tk.DoubleVar(value=100)
-        ttk.Scale(frame_settings, from_=10, to=300, orient="horizontal", variable=self.scale_var, command=self.on_transform_changed).grid(row=1, column=1, sticky="ew", padx=(5,0), pady=2)
+        row_idx = 1
         
-        ttk.Label(frame_settings, text="Format:").grid(row=2, column=0, sticky="w", pady=2)
+        ttk.Label(frame_settings, text="Scale (%):").grid(row=row_idx, column=0, sticky="w", pady=2)
+        self.scale_var = tk.DoubleVar(value=100)
+        ttk.Scale(frame_settings, from_=10, to=300, orient="horizontal", variable=self.scale_var, command=self.on_transform_changed).grid(row=row_idx, column=1, sticky="ew", padx=(5,0), pady=2)
+        row_idx += 1
+
+        ttk.Label(frame_settings, text="Opacity (%):").grid(row=row_idx, column=0, sticky="w", pady=2)
+        self.opacity_var = tk.DoubleVar(value=100)
+        ttk.Scale(frame_settings, from_=0, to=100, orient="horizontal", variable=self.opacity_var, command=self.on_transform_changed).grid(row=row_idx, column=1, sticky="ew", padx=(5,0), pady=2)
+        row_idx += 1
+        
+        ttk.Label(frame_settings, text="Format:").grid(row=row_idx, column=0, sticky="w", pady=2)
         self.format_var = tk.StringVar(value="Original")
         formats = ["Original", "MP4", "MKV", "AVI", "MOV"]
-        ttk.Combobox(frame_settings, textvariable=self.format_var, values=formats, state="readonly", width=14).grid(row=2, column=1, sticky="ew", padx=(5,0), pady=2)
+        ttk.Combobox(frame_settings, textvariable=self.format_var, values=formats, state="readonly", width=14).grid(row=row_idx, column=1, sticky="ew", padx=(5,0), pady=2)
+        row_idx += 1
         
-        ttk.Label(frame_settings, text="Quality:").grid(row=3, column=0, sticky="w", pady=2)
+        ttk.Label(frame_settings, text="Quality:").grid(row=row_idx, column=0, sticky="w", pady=2)
         self.quality_var = tk.StringVar(value="High (Lossless)")
         qualities = ["High (Lossless)", "Medium (Balanced)", "Low (Smaller File)"]
-        ttk.Combobox(frame_settings, textvariable=self.quality_var, values=qualities, state="readonly", width=14).grid(row=3, column=1, sticky="ew", padx=(5,0), pady=2)
+        ttk.Combobox(frame_settings, textvariable=self.quality_var, values=qualities, state="readonly", width=14).grid(row=row_idx, column=1, sticky="ew", padx=(5,0), pady=2)
+        row_idx += 1
 
-        ttk.Label(frame_settings, text="Timelapse:").grid(row=4, column=0, sticky="w", pady=2)
+        ttk.Label(frame_settings, text="Timelapse:").grid(row=row_idx, column=0, sticky="w", pady=2)
         self.speed_var = tk.StringVar(value="1x (Normal)")
         speeds = ["1x (Normal)", "2x", "4x", "8x", "16x", "0.5x (Slow)"]
-        ttk.Combobox(frame_settings, textvariable=self.speed_var, values=speeds, state="readonly", width=14).grid(row=4, column=1, sticky="ew", padx=(5,0), pady=2)
+        ttk.Combobox(frame_settings, textvariable=self.speed_var, values=speeds, state="readonly", width=14).grid(row=row_idx, column=1, sticky="ew", padx=(5,0), pady=2)
 
-        # 4. Output
-        frame_output = tk.LabelFrame(self.sidebar_frame, text="4. Output Directory", padx=10, pady=10)
+        # 5. Output
+        frame_output = tk.LabelFrame(self.sidebar_frame, text="5. Output Directory", padx=10, pady=10)
+
         frame_output.pack(fill="x", pady=(0, 10))
         self.lbl_output = tk.Label(frame_output, text="No directory selected", fg="gray", anchor="w")
         self.lbl_output.pack(fill="x", pady=(0, 5))
@@ -184,11 +214,14 @@ class WatermarkApp:
         self.controls_frame = tk.Frame(frame_preview)
         self.controls_frame.pack(side="bottom", fill="x", pady=5)
         
-        self.btn_play_pause = ttk.Button(self.controls_frame, text="▶ Play", command=self.toggle_play, width=8)
+        self.btn_play_pause = ttk.Button(self.controls_frame, text="▶ Play", command=self.toggle_play, width=10)
         self.btn_play_pause.pack(side="left")
         
         self.btn_stop = ttk.Button(self.controls_frame, text="⏹ Stop", command=self.stop_playback, width=8)
         self.btn_stop.pack(side="left", padx=5)
+        
+        self.btn_audio_preview = ttk.Button(self.controls_frame, text="🔊 Play with Audio", command=self.preview_with_audio, width=18)
+        self.btn_audio_preview.pack(side="left", padx=5)
         
         self.seek_var = tk.DoubleVar()
         self.seek_slider = ttk.Scale(self.controls_frame, from_=0, to=100, orient="horizontal", variable=self.seek_var, command=self.seek_video)
@@ -303,7 +336,8 @@ class WatermarkApp:
             scale = min(c_w/w, c_h/h)
             new_w, new_h = int(w * scale), int(h * scale)
             if new_w > 0 and new_h > 0:
-                frame = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
+                # INTER_AREA is better for shrinking, INTER_LINEAR/CUBIC for upscaling.
+                frame = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
                 
             cv2_im = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             img = Image.fromarray(cv2_im)
@@ -354,6 +388,13 @@ class WatermarkApp:
                     new_w = max(1, int(wm.size[0] * user_scale))
                     new_h = max(1, int(wm.size[1] * user_scale))
                     wm = wm.resize((new_w, new_h), resample_method)
+
+                # Apply opacity
+                opacity = self.opacity_var.get() / 100.0
+                if opacity < 1.0:
+                    r, g, b, a = wm.split()
+                    a = a.point(lambda p: int(p * opacity))
+                    wm = Image.merge("RGBA", (r, g, b, a))
 
                 scale_view = self.bg_width / orig_v_width if orig_v_width > 0 else 1.0
                 wm_w, wm_h = int(wm.size[0] * scale_view), int(wm.size[1] * scale_view)
@@ -451,6 +492,84 @@ class WatermarkApp:
             self.lbl_wm_preview.config(image='', text="None", width=6, height=3)
             self.refresh_preview()
 
+    def select_bgm(self):
+        file = filedialog.askopenfilename(
+            title="Select Background Music",
+            filetypes=(("Audio files", "*.mp3 *.wav *.m4a *.aac"), ("All files", "*.*"))
+        )
+        if file:
+            self.bgm_file = file
+            self.lbl_bgm.config(text=f"Replace with: {os.path.basename(file)}", fg="blue")
+
+    def clear_bgm(self):
+        self.bgm_file = ""
+        self.lbl_bgm.config(text="Original audio will be kept", fg="gray")
+
+    def preview_with_audio(self):
+        selected = self.listbox_videos.curselection()
+        if not selected:
+            messagebox.showwarning("Warning", "Please select a video from the list first.")
+            return
+        
+        index = selected[-1]
+        video_path = self.video_files[index]
+
+        # Disable button during small render
+        self.btn_audio_preview.config(state="disabled")
+        self.lbl_status.config(text="Generating audio preview (10s)...", fg="orange")
+        
+        threading.Thread(target=self._run_audio_preview_render, args=(video_path,), daemon=True).start()
+
+    def _run_audio_preview_render(self, video_path):
+        ffmpeg_path = self.get_ffmpeg_path()
+        if not ffmpeg_path: return
+        
+        temp_dir = os.path.join(os.path.abspath(os.path.dirname(__file__)), "temp_previews")
+        if not os.path.exists(temp_dir):
+            os.makedirs(temp_dir)
+            
+        out_path = os.path.join(temp_dir, "preview_sample.mp4")
+        filter_complex_str = self.get_ffmpeg_complex_filter_str()
+        v_filter, a_full_filter = filter_complex_str
+        
+        cmd = [
+            ffmpeg_path, "-y",
+            "-i", video_path,
+        ]
+        if self.watermark_file:
+            cmd.extend(["-i", self.watermark_file])
+            
+        if self.bgm_file:
+            cmd.extend(["-stream_loop", "-1", "-i", self.bgm_file])
+            
+        cmd.extend([
+            "-filter_complex", f"{v_filter};{a_full_filter}",
+            "-map", "[v]", "-map", "[a]",
+            "-t", "10",        # Only 10 seconds for speed
+            "-preset", "ultrafast", # Fastest encoding for preview
+            "-crf", "28",      # Lower quality for speed
+            out_path
+        ])
+        
+        # Hide console
+        startupinfo = None
+        if os.name == 'nt':
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+
+        try:
+            subprocess.run(cmd, startupinfo=startupinfo, check=True)
+            # Open with default player
+            if os.name == 'nt':
+                os.startfile(out_path)
+            elif os.name == 'posix':
+                subprocess.run(["open", out_path] if sys.platform == "darwin" else ["xdg-open", out_path])
+        except Exception as e:
+            self.root.after(0, lambda: messagebox.showerror("Preview Error", f"Failed to generate preview: {e}"))
+        finally:
+            self.root.after(0, lambda: self.btn_audio_preview.config(state="normal"))
+            self.root.after(0, lambda: self.lbl_status.config(text="Ready", fg="blue"))
+
     def refresh_preview(self):
         if hasattr(self, 'orig_v_width') and self.orig_v_width > 0:
             self.draw_preview_canvas(self.watermark_file, self.position_var.get(), self.orig_v_width)
@@ -547,13 +666,18 @@ class WatermarkApp:
             filters.append("format=rgba")
             filters.append(f"scale=iw*{user_scale}:ih*{user_scale}")
             
+        opacity_val = self.opacity_var.get() / 100.0
+        if opacity_val < 1.0:
+            if "format=rgba" not in filters:
+                filters.append("format=rgba")
+            filters.append(f"colorchannelmixer=aa={opacity_val}")
+
         # 1. Video Speed (Timelapse)
         speed_val = self.speed_var.get().split('x')[0]
         try:
             speed_factor = float(speed_val)
         except:
             speed_factor = 1.0
-            
         v_speed_filter = f"setpts={1/speed_factor}*PTS"
         
         # 2. Audio Speed (needs multiple atempo filters for > 2x)
@@ -569,15 +693,32 @@ class WatermarkApp:
             a_speed_filters.append(f"atempo={temp_speed}")
         
         a_filter_str = ",".join(a_speed_filters) if a_speed_filters else "anull"
+
+        # Determine indices
+        wm_idx = 1 if self.watermark_file else -1
+        bgm_idx = (wm_idx + 1) if self.bgm_file and wm_idx != -1 else (1 if self.bgm_file else -1)
                 
-        if filters:
+        if wm_idx != -1 and filters:
             wm_filter = ",".join(filters)
-            # Tag the final video stream as [v]
-            v_filter = f"[1:v]{wm_filter}[wm];[0:v]{v_speed_filter}[vspeed];[vspeed][wm]overlay={over_pos}[v]"
+            v_filter = f"[{wm_idx}:v]{wm_filter}[wm];[0:v]{v_speed_filter}[vspeed];[vspeed][wm]overlay={over_pos}[v]"
+        elif wm_idx != -1:
+            v_filter = f"[0:v]{v_speed_filter}[vspeed];[vspeed][{wm_idx}:v]overlay={over_pos}[v]"
         else:
-            v_filter = f"[0:v]{v_speed_filter}[vspeed];[vspeed][1:v]overlay={over_pos}[v]"
+            # No watermark
+            v_filter = f"[0:v]{v_speed_filter}[v]"
             
-        return v_filter, a_filter_str
+        # Audio selection logic for complex filter
+        if bgm_idx != -1:
+            # For BGM
+            full_a_filter = f"[{bgm_idx}:a]anull[a]"
+        elif self.mute_var.get():
+            # For Mute (generate silence)
+            full_a_filter = "anullsrc=r=44100:cl=stereo[a]"
+        else:
+            # For original audio
+            full_a_filter = f"[0:a]{a_filter_str}[a]"
+            
+        return v_filter, full_a_filter
 
     def start_processing(self):
         if not self.video_files:
@@ -629,22 +770,39 @@ class WatermarkApp:
                 startupinfo = subprocess.STARTUPINFO()
                 startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
 
-            v_filter, a_filter = filter_complex_str
+            v_filter, a_full_filter = filter_complex_str
 
             cmd = [
                 ffmpeg_path, 
                 "-y",                    # overwrite output
-                "-i", video_path,        # input video
-                "-i", self.watermark_file, # input watermark
-                "-filter_complex", f"{v_filter};[0:a]{a_filter}[a]",
+                "-i", video_path,        # input 0: video
+            ]
+            
+            if self.watermark_file:
+                cmd.extend(["-i", self.watermark_file]) # input 1: watermark
+            
+            if self.bgm_file:
+                # input 2: BGM (looped)
+                cmd.extend(["-stream_loop", "-1", "-i", self.bgm_file])
+                
+            # Add filter_complex
+            if self.mute_var.get() and not self.bgm_file:
+                # If mute is requested and no BGM, we can either use anullsrc or just skip mapping audio.
+                # Using anullsrc in filter_complex is safer for format consistency.
+                cmd.extend(["-filter_complex", f"{v_filter};{a_full_filter}"])
+            else:
+                cmd.extend(["-filter_complex", f"{v_filter};{a_full_filter}"])
+
+            cmd.extend([
                 "-map", "[v]",           # Map final video
                 "-map", "[a]",           # Map final audio
+                "-shortest",             # Ensure output duration matches video
                 "-c:v", "libx264",       
                 "-crf", crf_val,         
                 "-preset", "fast",       
-                "-c:a", "aac",           # Re-encode audio to support atempo
+                "-c:a", "aac",           # Re-encode audio to support atempo/silence
                 out_path
-            ]
+            ])
             
             try:
                 subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, startupinfo=startupinfo, check=True)
