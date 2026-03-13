@@ -57,6 +57,7 @@ class WatermarkApp:
 
         # UI Elements
         self.setup_ui()
+        self.update_wm_ui_state()
         self.load_config()
         
     def validate_numeric(self, P):
@@ -172,7 +173,8 @@ class WatermarkApp:
         
         self.tab_image = ttk.Frame(self.wm_notebook)
         self.wm_notebook.add(self.tab_image, text="Image")
-        ttk.Button(self.tab_image, text="Browse Image", command=self.select_watermark).pack(fill="x", padx=5, pady=5)
+        self.btn_select_img_wm = ttk.Button(self.tab_image, text="Browse Image", command=self.select_watermark)
+        self.btn_select_img_wm.pack(fill="x", padx=5, pady=5)
         
         self.tab_text = ttk.Frame(self.wm_notebook)
         self.wm_notebook.add(self.tab_text, text="Text")
@@ -207,7 +209,8 @@ class WatermarkApp:
         self.font_cb.pack(side="left", fill="x", expand=True, padx=2)
         self.font_cb.bind("<<ComboboxSelected>>", lambda e: self.save_config())
 
-        ttk.Button(self.tab_text, text="Apply Text Logo", command=self.generate_text_watermark).pack(fill="x", padx=5, pady=5)
+        self.btn_apply_text_wm = ttk.Button(self.tab_text, text="Apply Text Logo", command=self.generate_text_watermark)
+        self.btn_apply_text_wm.pack(fill="x", padx=5, pady=5)
         
         # Recent History
         h_frame = tk.Frame(frame_wm_group)
@@ -217,7 +220,8 @@ class WatermarkApp:
         self.cb_history.pack(side="left", fill="x", expand=True, padx=5)
         self.cb_history.bind("<<ComboboxSelected>>", self.on_history_selected)
         
-        ttk.Button(frame_wm_group, text="X Clear Watermark", command=self.clear_watermark_selection).pack(fill="x", pady=2)
+        self.btn_clear_wm = ttk.Button(frame_wm_group, text="X Clear Watermark", command=self.clear_watermark_selection)
+        self.btn_clear_wm.pack(fill="x", pady=2)
 
         # Detailed Params
         frame_wm_det = tk.Frame(frame_wm_group)
@@ -315,13 +319,34 @@ class WatermarkApp:
         files = filedialog.askopenfilenames(title="Select Videos", filetypes=(("Video", "*.mp4 *.avi *.mov *.mkv"), ("All", "*.*")))
         if not files: return
         is_first = len(self.video_files) == 0
+        invalid = []
         for f in files:
-            if f not in self.video_files:
-                self.video_files.append(f)
-                self.listbox_videos.insert(tk.END, os.path.basename(f))
+            if f in self.video_files: continue
+            
+            cap = cv2.VideoCapture(f)
+            if not cap.isOpened():
+                invalid.append(f"{os.path.basename(f)} (Readable error)")
+                continue
+                
+            w = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+            h = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+            cap.release()
+            
+            if h <= 0 or abs((w/h) - (9.0/16.0)) > 0.02:
+                invalid.append(os.path.basename(f))
+                continue
+
+            self.video_files.append(f)
+            self.listbox_videos.insert(tk.END, os.path.basename(f))
+            
+        if invalid:
+            msg = "Chỉ chấp nhận video định dạng dọc (9:16). Các file sau đã bị từ chối:\n\n" + "\n".join(invalid)
+            messagebox.showwarning("Sai định dạng", msg)
+
         if is_first and len(self.video_files) > 0:
             self.listbox_videos.select_set(0)
             self.show_preview(None)
+        self.update_wm_ui_state()
 
     def remove_videos(self):
         selected = self.listbox_videos.curselection()
@@ -340,6 +365,7 @@ class WatermarkApp:
             self.lbl_time.config(text="00:00 / 00:00")
             self.wm_start_time_var.set("0")
             self.wm_end_time_var.set("")
+        self.update_wm_ui_state()
 
     def show_preview(self, event):
         selected = self.listbox_videos.curselection()
@@ -497,6 +523,7 @@ class WatermarkApp:
             except: self.lbl_wm_preview.config(image='', text="Error")
 
     def select_watermark(self):
+        if not self.video_files: return
         f = filedialog.askopenfilename(title="Watermark", filetypes=(("Image","*.png *.jpg *.jpeg"),("All","*.*")))
         if f: 
             self.watermark_file=f
@@ -567,6 +594,7 @@ class WatermarkApp:
             self.lbl_color_box.config(bg=c[1])
 
     def generate_text_watermark(self):
+        if not self.video_files: return
         txt = self.text_var.get()
         if not txt: return
         f_name = self.font_var.get()
@@ -598,6 +626,7 @@ class WatermarkApp:
         self.save_config()
 
     def on_history_selected(self, e):
+        if not self.video_files: return
         idx = self.cb_history.current()
         if idx == -1: return
         item = self.history_wm[idx]
@@ -786,11 +815,14 @@ class WatermarkApp:
                     self.cb_history['values'] = [os.path.basename(i) if not i.startswith("TEXT:") else i for i in self.history_wm]
                     last_f = data.get("font_family", "Arial")
                     if last_f: self.font_var.set(last_f)
-                    self.rotate_var.set(data.get("rotate", 0))
+                    tc = data.get("text_color", "#FFFFFF")
+                    self.text_color_var.set(tc)
+                    try: self.lbl_color_box.config(bg=tc)
+                    except: pass
             except: pass
 
     def save_config(self):
-        data = {"output_dir": self.output_dir, "history_wm": self.history_wm, "font_family": self.font_var.get(), "rotate": self.rotate_var.get()}
+        data = {"output_dir": self.output_dir, "history_wm": self.history_wm, "font_family": self.font_var.get(), "text_color": self.text_color_var.get()}
         try:
             with open(self.config_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=4)
@@ -814,12 +846,29 @@ class WatermarkApp:
         self.wm_effect_var.set("None")
         self.wm_start_time_var.set("0")
         self.wm_end_time_var.set("")
+        self.rotate_var.set(0)
+        self.text_var.set("Sample")
+        self.text_size_var.set(80)
+        self.text_color_var.set("#FFFFFF")
+        try: self.lbl_color_box.config(bg="#FFFFFF")
+        except: pass
+        self.font_var.set("Arial")
         self.mute_var.set(False)
         self.lbl_status.config(text="Ready", fg="blue")
         self.progress_var.set(0)
         if self.video_cap: self.video_cap.release(); self.video_cap = None
         self.clear_preview("Select a video\nto preview")
+        self.update_wm_ui_state()
         messagebox.showinfo("Reset", "Settings wiped.")
+
+    def update_wm_ui_state(self):
+        state = "normal" if len(self.video_files) > 0 else "disabled"
+        try:
+            self.btn_select_img_wm.config(state=state)
+            self.btn_apply_text_wm.config(state=state)
+            self.btn_clear_wm.config(state=state)
+            self.cb_history.config(state="readonly" if state=="normal" else "disabled")
+        except: pass
 
 if __name__ == "__main__":
     root = tk.Tk(); app = WatermarkApp(root); root.mainloop()
