@@ -668,9 +668,10 @@ class WatermarkApp:
 
     def get_ffmpeg_complex_filter_str(self, vid_dur=0):
         p, pad = self.position_var.get(), 10
-        # Use high precision for custom ratios to avoid position drift
-        target_x = {"Top Left":f"{pad}", "Top Right":f"W-w-{pad}", "Bottom Left":f"{pad}", "Bottom Right":f"W-w-{pad}", "Center":"(W-w)/2"}.get(p, f"W*{self.custom_x_ratio:.6f}")
-        target_y = {"Top Left":f"{pad}", "Top Right":f"{pad}", "Bottom Left":f"H-h-{pad}", "Bottom Right":f"H-h-{pad}", "Center":"(H-h)/2"}.get(p, f"H*{self.custom_y_ratio:.6f}")
+        # Target coordinates on the actual video resolution
+        # We use W and H (video dimensions) and w, h (watermark dimensions after its filters)
+        target_x = {"Top Left": f"{pad}", "Top Right": f"W-w-{pad}", "Bottom Left": f"{pad}", "Bottom Right": f"W-w-{pad}", "Center": "(W-w)/2"}.get(p, f"W*{self.custom_x_ratio:.6f}")
+        target_y = {"Top Left": f"{pad}", "Top Right": f"{pad}", "Bottom Left": f"H-h-{pad}", "Bottom Right": f"H-h-{pad}", "Center": "(H-h)/2"}.get(p, f"H*{self.custom_y_ratio:.6f}")
         
         flt = ["format=rgba"]
         usc = self.scale_var.get()/100.0
@@ -678,7 +679,11 @@ class WatermarkApp:
         
         rot = self.rotate_var.get()
         if rot != 0:
-            flt.append(f"rotate={rot}*PI/180:ow='hypot(iw,ih)':oh=ow:c=none")
+            # Sync FFmpeg's rotation bounding box with PIL's expand=True logic
+            # ow = iw*abs(cos(a)) + ih*abs(sin(a))
+            rad = f"({rot}*PI/180)"
+            flt.append(f"rotate={rad}:c=none:ow='iw*abs(cos({rad}))+ih*abs(sin({rad}))':oh='iw*abs(sin({rad}))+ih*abs(cos({rad}))'")
+
         st, ed = 0, 999999
         try:
             st = float(self.wm_start_time_var.get() or 0)
