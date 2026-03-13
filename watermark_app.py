@@ -36,8 +36,11 @@ class WatermarkApp:
         
         self.mute_var = tk.BooleanVar(value=False)
         self.opacity_var = tk.DoubleVar(value=100)
+        self.v_fade_var = tk.StringVar(value="None")
+        self.wm_effect_var = tk.StringVar(value="None")
         self.wm_start_time_var = tk.StringVar(value="0")
         self.wm_end_time_var = tk.StringVar(value="")
+        self.preview_bg_img = None
         
         # Registration for numeric validation
         self._vcmd = (self.root.register(self.validate_numeric), '%P')
@@ -105,12 +108,17 @@ class WatermarkApp:
         self.speed_var = tk.StringVar(value="1x (Normal)")
         ttk.Combobox(frame_v_cfg, textvariable=self.speed_var, values=["1x (Normal)", "2x", "4x", "8x", "16x", "0.5x (Slow)"], state="readonly", width=12).grid(row=2, column=1, sticky="ew", padx=10)
 
-        # Output
+        ttk.Label(frame_v_cfg, text="Fade:").grid(row=3, column=0, sticky="w", pady=2)
+        ttk.Combobox(frame_v_cfg, textvariable=self.v_fade_var, values=["None", "Fade In", "Fade Out", "Both"], state="readonly", width=12).grid(row=3, column=1, sticky="ew", padx=10)
+
         frame_out = tk.Frame(frame_video_group, pady=5)
         frame_out.pack(fill="x")
         self.lbl_output = tk.Label(frame_out, text="Output: Not Set", fg="gray", anchor="w", font=("Arial", 8), wraplength=300)
         self.lbl_output.pack(fill="x")
-        ttk.Button(frame_out, text="Set Output Folder", command=self.select_output_dir).pack(fill="x")
+        out_btns = tk.Frame(frame_out)
+        out_btns.pack(fill="x")
+        ttk.Button(out_btns, text="Set Folder", command=self.select_output_dir).pack(side="left", fill="x", expand=True)
+        ttk.Button(out_btns, text="Open Folder", command=self.open_output_dir).pack(side="left", padx=2)
 
         # 2. WATERMARK SETTINGS BLOCK
         frame_wm_group = tk.LabelFrame(self.sidebar_frame, text="WATERMARK SETTINGS", padx=10, pady=10, fg="darkgreen", font=("Arial", 10, "bold"))
@@ -169,6 +177,9 @@ class WatermarkApp:
         ttk.Label(frame_wm_det, text="End(s):").grid(row=4, column=0, sticky="w")
         tk.Entry(frame_wm_det, textvariable=self.wm_end_time_var, width=12, validate='key', validatecommand=self._vcmd).grid(row=4, column=1, sticky="ew", padx=10, pady=2)
 
+        ttk.Label(frame_wm_det, text="Effect:").grid(row=5, column=0, sticky="w")
+        ttk.Combobox(frame_wm_det, textvariable=self.wm_effect_var, values=["None", "Fade", "Fly In (L)", "Fly In (R)"], state="readonly", width=12).grid(row=5, column=1, sticky="ew", padx=10, pady=2)
+
         # 3. AUDIO (Inside or below)
         frame_audio = tk.Frame(frame_wm_group, pady=5)
         frame_audio.pack(fill="x")
@@ -221,10 +232,15 @@ class WatermarkApp:
 
     def add_videos(self):
         files = filedialog.askopenfilenames(title="Select Videos", filetypes=(("Video", "*.mp4 *.avi *.mov *.mkv"), ("All", "*.*")))
+        if not files: return
+        is_first = len(self.video_files) == 0
         for f in files:
             if f not in self.video_files:
                 self.video_files.append(f)
                 self.listbox_videos.insert(tk.END, os.path.basename(f))
+        if is_first and len(self.video_files) > 0:
+            self.listbox_videos.select_set(0)
+            self.show_preview(None)
 
     def remove_videos(self):
         selected = self.listbox_videos.curselection()
@@ -313,6 +329,7 @@ class WatermarkApp:
         else: self.stop_playback()
 
     def draw_preview_canvas(self, path, pos, v_w, fast_mode=False):
+        if not self.preview_bg_img: return
         self.canvas_preview.delete("all")
         c_w, c_h = self.canvas_preview.winfo_width(), self.canvas_preview.winfo_height()
         ox, oy = (c_w-self.bg_width)//2, (c_h-self.bg_height)//2
@@ -321,19 +338,26 @@ class WatermarkApp:
         try:
             fps = self.video_cap.get(cv2.CAP_PROP_FPS) or 30
             cur = self.video_cap.get(cv2.CAP_PROP_POS_FRAMES)/fps
-            start = float(self.wm_start_time_var.get() or 0)
-            end = self.wm_end_time_var.get().strip()
-            if (cur < start) or (end and cur > float(end)): visible = False
+            st_pre = float(self.wm_start_time_var.get() or 0)
+            end_val = self.wm_end_time_var.get().strip()
+            end = float(end_val) if end_val else 999999
+            if (cur < st_pre) or (cur > end): visible = False
         except: pass
         if path and os.path.exists(path) and visible:
             try:
                 wm = Image.open(path).convert("RGBA")
                 usc = self.scale_var.get()/100.0
                 if usc != 1.0: wm = wm.resize((max(1,int(wm.size[0]*usc)), max(1,int(wm.size[1]*usc))), Image.Resampling.NEAREST if fast_mode else Image.Resampling.LANCZOS)
-                opa = self.opacity_var.get()/100.0
+                opa_base = self.opacity_var.get()/100.0
+                wm_eff = self.wm_effect_var.get()
+                opa = opa_base
+                eff_dur = 0.5
+                if wm_eff == "Fade":
+                    if cur < st_pre + eff_dur: opa = opa_base * ((cur-st_pre)/eff_dur)
+                    elif cur > end - eff_dur: opa = opa_base * ((end-cur)/eff_dur)
                 if opa < 1.0:
                     r,g,b,a = wm.split()
-                    wm = Image.merge("RGBA", (r,g,b,a.point(lambda p: int(p*opa))))
+                    wm = Image.merge("RGBA", (r,g,b,a.point(lambda p: int(p*max(0,min(1,opa))))))
                 vsc = self.bg_width / v_w if v_w > 0 else 1.0
                 ww, wh = int(wm.size[0]*vsc), int(wm.size[1]*vsc)
                 if ww>0 and wh>0:
@@ -346,6 +370,12 @@ class WatermarkApp:
                     elif pos == "Bottom Right": px, py = self.bg_width-ww-pad, self.bg_height-wh-pad
                     elif pos == "Center": px, py = (self.bg_width-ww)/2, (self.bg_height-wh)/2
                     elif pos == "Custom (Drag)": px, py = self.custom_x_ratio*self.bg_width, self.custom_y_ratio*self.bg_height
+                    
+                    if wm_eff == "Fly In (L)" and cur < st_pre + eff_dur:
+                        px = px - (px + ww) * (1 - max(0, (cur-st_pre)/eff_dur))
+                    elif wm_eff == "Fly In (R)" and cur < st_pre + eff_dur:
+                        px = px + (self.bg_width - px) * (1 - max(0, (cur-st_pre)/eff_dur))
+                        
                     self.canvas_preview.create_image(ox+px, oy+py, image=self.preview_wm_img, anchor="nw", tags="watermark")
             except: pass
 
@@ -399,11 +429,26 @@ class WatermarkApp:
         tmp = os.path.join(os.path.dirname(__file__), "temp_previews")
         if not os.path.exists(tmp): os.makedirs(tmp)
         out = os.path.join(tmp, "preview_sample.mp4")
-        v_f, a_f = self.get_ffmpeg_complex_filter_str()
+
+        cap = cv2.VideoCapture(path)
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30
+        spd = float(self.speed_var.get().split('x')[0])
+        raw_dur = (cap.get(cv2.CAP_PROP_FRAME_COUNT)/fps) if fps>0 else 10
+        cap.release()
+        
+        # In preview we only render 10s. If original is longer, fade out won't show unless we cap it.
+        dur_v = min(10.0, raw_dur / spd)
+        
+        v_f, a_f = self.get_ffmpeg_complex_filter_str(dur_v)
         cmd = [exe, "-y", "-i", path]
-        if self.watermark_file: cmd.extend(["-i", self.watermark_file])
+        if self.watermark_file:
+            ext_wm = os.path.splitext(self.watermark_file)[1].lower()
+            if ext_wm in ['.png', '.jpg', '.jpeg']:
+                cmd.extend(["-loop", "1", "-i", self.watermark_file])
+            else:
+                cmd.extend(["-i", self.watermark_file])
         if self.bgm_file: cmd.extend(["-stream_loop", "-1", "-i", self.bgm_file])
-        cmd.extend(["-filter_complex", f"{v_f};{a_f}", "-map", "[v]", "-map", "[a]", "-t", "10", "-preset", "ultrafast", out])
+        cmd.extend(["-filter_complex", f"{v_f};{a_f}", "-map", "[v]", "-map", "[a]", "-t", "10", "-shortest", "-preset", "ultrafast", out])
         si = subprocess.STARTUPINFO() if os.name=='nt' else None
         if si: si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         try:
@@ -416,7 +461,7 @@ class WatermarkApp:
     def on_position_changed(self, e=None): self.refresh_preview()
     def on_transform_changed(self, e=None): self.refresh_preview()
     def refresh_preview(self): 
-        if self.orig_v_width > 0: self.draw_preview_canvas(self.watermark_file, self.position_var.get(), self.orig_v_width)
+        if self.video_cap and self.preview_bg_img: self.draw_preview_canvas(self.watermark_file, self.position_var.get(), self.orig_v_width)
 
     def pick_color(self):
         c = colorchooser.askcolor(title="Color", initialcolor=self.text_color_var.get())
@@ -441,22 +486,48 @@ class WatermarkApp:
     def open_output_dir(self):
         if self.output_dir: os.startfile(self.output_dir) if os.name=='nt' else subprocess.call(['xdg-open', self.output_dir])
 
-    def get_ffmpeg_complex_filter_str(self):
+    def get_ffmpeg_complex_filter_str(self, vid_dur=0):
         p, pad = self.position_var.get(), 10
-        pos = {"Top Left":f"{pad}:{pad}", "Top Right":f"W-w-{pad}:{pad}", "Bottom Left":f"{pad}:H-h-{pad}", "Bottom Right":f"W-w-{pad}:H-h-{pad}", "Center":"(W-w)/2:(H-h)/2"}.get(p, f"W*{self.custom_x_ratio}:H*{self.custom_y_ratio}")
+        target_x = {"Top Left":f"{pad}", "Top Right":f"W-w-{pad}", "Bottom Left":f"{pad}", "Bottom Right":f"W-w-{pad}", "Center":"(W-w)/2"}.get(p, f"W*{self.custom_x_ratio}")
+        target_y = {"Top Left":f"{pad}", "Top Right":f"{pad}", "Bottom Left":f"H-h-{pad}", "Bottom Right":f"H-h-{pad}", "Center":"(H-h)/2"}.get(p, f"H*{self.custom_y_ratio}")
+        
         flt = ["format=rgba"]
         usc = self.scale_var.get()/100.0
         if usc != 1.0: flt.append(f"scale=iw*{usc}:ih*{usc}")
-        opa = self.opacity_var.get()/100.0
-        if opa < 1.0: flt.append(f"colorchannelmixer=aa={opa}")
-        en = ""
+        st, ed = 0, 999999
         try:
             st = float(self.wm_start_time_var.get() or 0)
-            ed = self.wm_end_time_var.get().strip()
-            en = f":enable='between(t,{st},{ed})'" if ed else (f":enable='gte(t,{st})'" if st>0 else "")
+            ed_val = self.wm_end_time_var.get().strip()
+            if ed_val: ed = float(ed_val)
         except: pass
+
+        wm_eff = self.wm_effect_var.get()
+        if wm_eff == "Fade":
+            flt.append(f"fade=t=in:st={st}:d=0.5:alpha=1")
+            if ed < 999998:
+                flt.append(f"fade=t=out:st={ed-0.5}:d=0.5:alpha=1")
+        
+        opa = self.opacity_var.get()/100.0
+        if opa < 1.0: flt.append(f"colorchannelmixer=aa={opa}")
+            
+        en = f"enable='between(t,{st},{ed})'"
+        
+        wm_x = f"'{target_x}'"
+        wm_y = f"'{target_y}'"
+        d = 0.5
+        
+        if wm_eff == "Fly In (L)":
+            wm_x = f"'if(lt(t,{st}+{d}), -w+(t-{st})/{d}*({target_x}+w), {target_x})'"
+        elif wm_eff == "Fly In (R)":
+            wm_x = f"'if(lt(t,{st}+{d}), W+(t-{st})/{d}*({target_x}-W), {target_x})'"
+
         spd = float(self.speed_var.get().split('x')[0])
-        v_spd = f"setpts={1/spd}*PTS"
+        v_flt_base = f"setpts={1/spd}*PTS"
+        
+        v_eff = self.v_fade_var.get()
+        if v_eff == "Fade In" or v_eff == "Both": v_flt_base += ",fade=t=in:st=0:d=1"
+        if (v_eff == "Fade Out" or v_eff == "Both") and vid_dur > 0: v_flt_base += f",fade=t=out:st={vid_dur-1}:d=1"
+
         a_f = []
         tmp_s = spd
         while tmp_s>2.0: a_f.append("atempo=2.0"); tmp_s/=2.0
@@ -465,7 +536,14 @@ class WatermarkApp:
         a_s = ",".join(a_f) if a_f else "anull"
         wm_i = 1 if self.watermark_file else -1
         bg_i = (wm_i+1) if self.bgm_file and wm_i!=-1 else (1 if self.bgm_file else -1)
-        v_res = f"[{wm_i}:v]{','.join(flt)}[wm];[0:v]{v_spd}[vs];[vs][wm]overlay={pos}{en}[v]" if wm_i!=-1 else f"[0:v]{v_spd}[v]"
+        
+        # Overlay with explicit x, y and enable
+        if wm_i != -1:
+            overlay_str = f"overlay=x={wm_x}:y={wm_y}:{en}"
+            v_res = f"[{wm_i}:v]{','.join(flt)}[wm];[0:v]{v_flt_base}[vs];[vs][wm]{overlay_str}[v]"
+        else:
+            v_res = f"[0:v]{v_flt_base}[v]"
+            
         a_res = f"[{bg_i}:a]anull[a]" if bg_i!=-1 else (f"anullsrc=r=44100:cl=stereo[a]" if self.mute_var.get() else f"[0:a]{a_s}[a]")
         return v_res, a_res
 
@@ -476,22 +554,52 @@ class WatermarkApp:
 
     def process_videos(self):
         exe = imageio_ffmpeg.get_ffmpeg_exe()
-        f_v, f_a = self.get_ffmpeg_complex_filter_str()
+        spd = float(self.speed_var.get().split('x')[0])
+        total = len(self.video_files)
+        
         for i, path in enumerate(self.video_files):
-            name, ext = os.path.splitext(os.path.basename(path))
+            # Update status for current file
+            fname = os.path.basename(path)
+            self.root.after(0, lambda n=fname, idx=i+1: self.lbl_status.config(text=f"Processing ({idx}/{total}): {n}", fg="orange"))
+            
+            cap = cv2.VideoCapture(path)
+            fps_v = cap.get(cv2.CAP_PROP_FPS) or 30
+            dur_raw = cap.get(cv2.CAP_PROP_FRAME_COUNT)/fps_v if fps_v>0 else 1
+            cap.release()
+            
+            f_v, f_a = self.get_ffmpeg_complex_filter_str(dur_raw/spd)
+            name, ext = os.path.splitext(fname)
             out_ext = ext if self.format_var.get()=="Original" else f".{self.format_var.get().lower()}"
             out = os.path.join(self.output_dir, f"watermarked_{name}{out_ext}")
             crf = {"Low (Smaller File)":"28", "Medium (Balanced)":"23"}.get(self.quality_var.get(), "18")
+            
             cmd = [exe, "-y", "-i", path]
-            if self.watermark_file: cmd.extend(["-i", self.watermark_file])
+            if self.watermark_file:
+                ext_wm = os.path.splitext(self.watermark_file)[1].lower()
+                if ext_wm in ['.png', '.jpg', '.jpeg']:
+                    cmd.extend(["-loop", "1", "-i", self.watermark_file])
+                else:
+                    cmd.extend(["-i", self.watermark_file])
             if self.bgm_file: cmd.extend(["-stream_loop", "-1", "-i", self.bgm_file])
-            cmd.extend(["-filter_complex", f"{f_v};{f_a}", "-map", "[v]", "-map", "[a]", "-shortest", "-c:v", "libx264", "-crf", crf, "-preset", "fast", "-c:a", "aac", out])
+            
+            target_dur = dur_raw / spd
+            cmd.extend(["-filter_complex", f"{f_v};{f_a}", "-map", "[v]", "-map", "[a]", "-t", f"{target_dur}", "-c:v", "libx264", "-crf", crf, "-preset", "fast", "-c:a", "aac", out])
+            
             si = subprocess.STARTUPINFO() if os.name=='nt' else None
             if si: si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-            try: subprocess.run(cmd, startupinfo=si, check=True)
-            except Exception as e: self.root.after(0, lambda: messagebox.showerror("Error", str(e))); continue
-            self.root.after(0, lambda p=((i+1)/len(self.video_files))*100: self.progress_var.set(p))
-        self.root.after(0, lambda: (self.lbl_status.config(text="Completed!", fg="green"), self.btn_start.config(state="normal"), messagebox.showinfo("Success", "Done.")))
+            
+            try:
+                # Capture stderr for better error reporting
+                result = subprocess.run(cmd, startupinfo=si, capture_output=True, text=True)
+                if result.returncode != 0:
+                    raise Exception(result.stderr)
+            except Exception as e:
+                self.root.after(0, lambda err=str(e): messagebox.showerror("Processing Error", f"FFmpeg failed: {err}"))
+                continue
+                
+            self.root.after(0, lambda p=((i+1)/total)*100: self.progress_var.set(p))
+            
+        self.root.after(0, lambda: (self.lbl_status.config(text="Completed!", fg="green"), self.btn_start.config(state="normal"), self.open_output_dir(), messagebox.showinfo("Success", "Batch processing finished. Output folder opened.")))
 
     def fmt_time(self, s): mins, secs = int(max(0,s)//60), int(max(0,s)%60); return f"{mins:02d}:{secs:02d}"
 
