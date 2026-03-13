@@ -46,6 +46,7 @@ class WatermarkApp:
         self.text_color_var = tk.StringVar(value="#FFFFFF")
         self.text_size_var = tk.IntVar(value=80)
         self.font_var = tk.StringVar(value="Arial")
+        self.rotate_var = tk.DoubleVar(value=0)
         self.preview_bg_img = None
         
         self.config_path = os.path.join(os.path.dirname(__file__), "config.json")
@@ -76,7 +77,7 @@ class WatermarkApp:
         self.main_container.pack(fill="both", expand=True)
 
         # ---------------- SIDEBAR (Left Column) with Scrollbar ---------------- #
-        self.sidebar_outer = tk.Frame(self.main_container, width=380)
+        self.sidebar_outer = tk.Frame(self.main_container, width=340)
         self.sidebar_outer.pack(side="left", fill="y", padx=(0, 10))
         self.sidebar_outer.pack_propagate(False)
 
@@ -235,15 +236,18 @@ class WatermarkApp:
         ttk.Label(frame_wm_det, text="Opacity:").grid(row=2, column=0, sticky="w")
         self.opacity_var = tk.DoubleVar(value=100)
         ttk.Scale(frame_wm_det, from_=0, to=100, orient="horizontal", variable=self.opacity_var, command=self.on_transform_changed).grid(row=2, column=1, sticky="ew", padx=10, pady=2)
+        
+        ttk.Label(frame_wm_det, text="Rotate:").grid(row=3, column=0, sticky="w")
+        ttk.Scale(frame_wm_det, from_=0, to=360, orient="horizontal", variable=self.rotate_var, command=self.on_transform_changed).grid(row=3, column=1, sticky="ew", padx=10, pady=2)
 
-        ttk.Label(frame_wm_det, text="Start(s):").grid(row=3, column=0, sticky="w")
-        tk.Entry(frame_wm_det, textvariable=self.wm_start_time_var, width=12, validate='key', validatecommand=self._vcmd).grid(row=3, column=1, sticky="ew", padx=10, pady=2)
+        ttk.Label(frame_wm_det, text="Start(s):").grid(row=4, column=0, sticky="w")
+        tk.Entry(frame_wm_det, textvariable=self.wm_start_time_var, width=12, validate='key', validatecommand=self._vcmd).grid(row=4, column=1, sticky="ew", padx=10, pady=2)
 
-        ttk.Label(frame_wm_det, text="End(s):").grid(row=4, column=0, sticky="w")
-        tk.Entry(frame_wm_det, textvariable=self.wm_end_time_var, width=12, validate='key', validatecommand=self._vcmd).grid(row=4, column=1, sticky="ew", padx=10, pady=2)
+        ttk.Label(frame_wm_det, text="End(s):").grid(row=5, column=0, sticky="w")
+        tk.Entry(frame_wm_det, textvariable=self.wm_end_time_var, width=12, validate='key', validatecommand=self._vcmd).grid(row=5, column=1, sticky="ew", padx=10, pady=2)
 
-        ttk.Label(frame_wm_det, text="Effect:").grid(row=5, column=0, sticky="w")
-        ttk.Combobox(frame_wm_det, textvariable=self.wm_effect_var, values=["None", "Fade", "Fly In (L)", "Fly In (R)"], state="readonly", width=12).grid(row=5, column=1, sticky="ew", padx=10, pady=2)
+        ttk.Label(frame_wm_det, text="Effect:").grid(row=6, column=0, sticky="w")
+        ttk.Combobox(frame_wm_det, textvariable=self.wm_effect_var, values=["None", "Fade", "Fly In (L)", "Fly In (R)"], state="readonly", width=12).grid(row=6, column=1, sticky="ew", padx=10, pady=2)
 
         # 3. AUDIO (Inside or below)
         frame_audio = tk.Frame(frame_wm_group, pady=5)
@@ -285,7 +289,7 @@ class WatermarkApp:
         frame_preview = tk.LabelFrame(self.main_container, text="Video Preview (Drag logo to position)", padx=5, pady=5)
         frame_preview.pack(side="right", fill="both", expand=True)
         
-        self.canvas_preview = tk.Canvas(frame_preview, bg="black")
+        self.canvas_preview = tk.Canvas(frame_preview, bg="black", highlightthickness=0, borderwidth=0)
         self.canvas_preview.pack(fill="both", expand=True, pady=(0, 5))
         self.canvas_preview.tag_bind("watermark", "<ButtonPress-1>", self.on_drag_start)
         self.canvas_preview.tag_bind("watermark", "<B1-Motion>", self.on_drag_motion)
@@ -409,8 +413,11 @@ class WatermarkApp:
     def draw_preview_canvas(self, path, pos, v_w, fast_mode=False):
         if not self.preview_bg_img: return
         self.canvas_preview.delete("all")
-        c_w, c_h = self.canvas_preview.winfo_width(), self.canvas_preview.winfo_height()
-        ox, oy = (c_w-self.bg_width)//2, (c_h-self.bg_height)//2
+        c_w = max(1, self.canvas_preview.winfo_width())
+        c_h = max(1, self.canvas_preview.winfo_height())
+        # Use rounding for stable coordinate offsets across UI changes
+        ox = int(round((c_w - self.bg_width) / 2.0))
+        oy = int(round((c_h - self.bg_height) / 2.0))
         self.canvas_preview.create_image(ox, oy, image=self.preview_bg_img, anchor="nw", tags="bg")
         visible = True
         try:
@@ -426,6 +433,9 @@ class WatermarkApp:
                 wm = Image.open(path).convert("RGBA")
                 usc = self.scale_var.get()/100.0
                 if usc != 1.0: wm = wm.resize((max(1,int(wm.size[0]*usc)), max(1,int(wm.size[1]*usc))), Image.Resampling.NEAREST if fast_mode else Image.Resampling.LANCZOS)
+                
+                rot = self.rotate_var.get()
+                if rot != 0: wm = wm.rotate(-rot, expand=True, resample=Image.Resampling.BICUBIC)
                 opa_base = self.opacity_var.get()/100.0
                 wm_eff = self.wm_effect_var.get()
                 opa = opa_base
@@ -436,6 +446,7 @@ class WatermarkApp:
                 if opa < 1.0:
                     r,g,b,a = wm.split()
                     wm = Image.merge("RGBA", (r,g,b,a.point(lambda p: int(p*max(0,min(1,opa))))))
+                # Always scale relative to current actual background image size for pixel stability
                 vsc = self.bg_width / v_w if v_w > 0 else 1.0
                 ww, wh = wm.size[0]*vsc, wm.size[1]*vsc
                 if ww>0 and wh>0:
@@ -469,9 +480,12 @@ class WatermarkApp:
         self._drag_data = {'x':e.x, 'y':e.y}
         coords = self.canvas_preview.coords("watermark")
         if coords:
-            ox, oy = (self.canvas_preview.winfo_width()-self.bg_width)//2, (self.canvas_preview.winfo_height()-self.bg_height)//2
-            self.custom_x_ratio = max(0.0, min(1.0, (coords[0]-ox)/self.bg_width))
-            self.custom_y_ratio = max(0.0, min(1.0, (coords[1]-oy)/self.bg_height))
+            # Match the stable offset logic for synchronization
+            c_w, c_h = max(1, self.canvas_preview.winfo_width()), max(1, self.canvas_preview.winfo_height())
+            ox = int(round((c_w - self.bg_width) / 2.0))
+            oy = int(round((c_h - self.bg_height) / 2.0))
+            self.custom_x_ratio = (coords[0]-ox)/self.bg_width
+            self.custom_y_ratio = (coords[1]-oy)/self.bg_height
             if self.position_var.get() != "Custom (Drag)": self.position_var.set("Custom (Drag)")
 
     def update_wm_preview(self):
@@ -622,6 +636,10 @@ class WatermarkApp:
         flt = ["format=rgba"]
         usc = self.scale_var.get()/100.0
         if usc != 1.0: flt.append(f"scale=iw*{usc}:ih*{usc}")
+        
+        rot = self.rotate_var.get()
+        if rot != 0:
+            flt.append(f"rotate={rot}*PI/180:ow='hypot(iw,ih)':oh=ow:c=none")
         st, ed = 0, 999999
         try:
             st = float(self.wm_start_time_var.get() or 0)
@@ -768,10 +786,11 @@ class WatermarkApp:
                     self.cb_history['values'] = [os.path.basename(i) if not i.startswith("TEXT:") else i for i in self.history_wm]
                     last_f = data.get("font_family", "Arial")
                     if last_f: self.font_var.set(last_f)
+                    self.rotate_var.set(data.get("rotate", 0))
             except: pass
 
     def save_config(self):
-        data = {"output_dir": self.output_dir, "history_wm": self.history_wm, "font_family": self.font_var.get()}
+        data = {"output_dir": self.output_dir, "history_wm": self.history_wm, "font_family": self.font_var.get(), "rotate": self.rotate_var.get()}
         try:
             with open(self.config_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=4)
