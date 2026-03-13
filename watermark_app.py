@@ -20,6 +20,16 @@ class WatermarkApp:
         else:
             self.root.attributes('-zoomed', True)
         
+        self.root.resizable(False, False) # Disable resizing
+
+        # Set window icon
+        if os.path.exists("logo.png"):
+            try:
+                self.icon_img = ImageTk.PhotoImage(file="logo.png")
+                self.root.iconphoto(False, self.icon_img)
+            except:
+                pass
+        
         self.video_files = []
         self.watermark_file = ""
         self.bgm_file = ""
@@ -340,8 +350,8 @@ class WatermarkApp:
             self.listbox_videos.insert(tk.END, os.path.basename(f))
             
         if invalid:
-            msg = "Chỉ chấp nhận video định dạng dọc (9:16). Các file sau đã bị từ chối:\n\n" + "\n".join(invalid)
-            messagebox.showwarning("Sai định dạng", msg)
+            msg = "Only 9:16 (vertical) videos are accepted. These files were rejected:\n\n" + "\n".join(invalid)
+            messagebox.showwarning("Invalid Format", msg)
 
         if is_first and len(self.video_files) > 0:
             self.listbox_videos.select_set(0)
