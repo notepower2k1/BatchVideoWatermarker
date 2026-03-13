@@ -36,6 +36,8 @@ class WatermarkApp:
         
         self.mute_var = tk.BooleanVar(value=False)
         self.opacity_var = tk.DoubleVar(value=100)
+        self.orig_vol_var = tk.DoubleVar(value=100)
+        self.bgm_vol_var = tk.DoubleVar(value=100)
         self.v_fade_var = tk.StringVar(value="None")
         self.wm_effect_var = tk.StringVar(value="None")
         self.wm_start_time_var = tk.StringVar(value="0")
@@ -191,6 +193,16 @@ class WatermarkApp:
         a_btns.pack(fill="x")
         ttk.Button(a_btns, text="Set Music", command=self.select_bgm).pack(side="left", fill="x", expand=True)
         ttk.Button(a_btns, text="X", command=self.clear_bgm, width=3).pack(side="left", padx=2)
+        
+        v_box = tk.Frame(frame_audio, pady=5)
+        v_box.pack(fill="x")
+        ttk.Label(v_box, text="Orig Vol:", width=8).grid(row=0, column=0, sticky="w")
+        ttk.Scale(v_box, from_=0, to=200, orient="horizontal", variable=self.orig_vol_var).grid(row=0, column=1, sticky="ew", padx=5)
+        
+        ttk.Label(v_box, text="BGM Vol:", width=8).grid(row=1, column=0, sticky="w")
+        ttk.Scale(v_box, from_=0, to=200, orient="horizontal", variable=self.bgm_vol_var).grid(row=1, column=1, sticky="ew", padx=5)
+        v_box.columnconfigure(1, weight=1)
+
         tk.Checkbutton(frame_audio, text="Mute Original", variable=self.mute_var).pack(anchor="w")
 
         # Action block
@@ -452,7 +464,7 @@ class WatermarkApp:
         si = subprocess.STARTUPINFO() if os.name=='nt' else None
         if si: si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         try:
-            subprocess.run(cmd, startupinfo=si, check=True)
+            subprocess.run(cmd, startupinfo=si, check=True, capture_output=True, text=True, encoding='utf-8', errors='replace')
             if os.name=='nt': os.startfile(out)
             else: subprocess.run(["open" if sys.platform=="darwin" else "xdg-open", out])
         except Exception as e: self.root.after(0, lambda: messagebox.showerror("Error", str(e)))
@@ -528,23 +540,49 @@ class WatermarkApp:
         if v_eff == "Fade In" or v_eff == "Both": v_flt_base += ",fade=t=in:st=0:d=1"
         if (v_eff == "Fade Out" or v_eff == "Both") and vid_dur > 0: v_flt_base += f",fade=t=out:st={vid_dur-1}:d=1"
 
-        a_f = []
+        # Audio Processing logic
+        v_orig = self.orig_vol_var.get() / 100.0
+        v_bgm = self.bgm_vol_var.get() / 100.0
+        
         tmp_s = spd
-        while tmp_s>2.0: a_f.append("atempo=2.0"); tmp_s/=2.0
-        while tmp_s<0.5: a_f.append("atempo=0.5"); tmp_s*=2.0
-        if tmp_s!=1.0: a_f.append(f"atempo={tmp_s}")
-        a_s = ",".join(a_f) if a_f else "anull"
+        tempo_f = []
+        while tmp_s>2.0: tempo_f.append("atempo=2.0"); tmp_s/=2.0
+        while tmp_s<0.5: tempo_f.append("atempo=0.5"); tmp_s*=2.0
+        if tmp_s!=1.0: tempo_f.append(f"atempo={tmp_s}")
+        a_s = ",".join(tempo_f) if tempo_f else "anull"
+
         wm_i = 1 if self.watermark_file else -1
         bg_i = (wm_i+1) if self.bgm_file and wm_i!=-1 else (1 if self.bgm_file else -1)
         
-        # Overlay with explicit x, y and enable
+        # Video stream
         if wm_i != -1:
             overlay_str = f"overlay=x={wm_x}:y={wm_y}:{en}"
             v_res = f"[{wm_i}:v]{','.join(flt)}[wm];[0:v]{v_flt_base}[vs];[vs][wm]{overlay_str}[v]"
         else:
             v_res = f"[0:v]{v_flt_base}[v]"
             
-        a_res = f"[{bg_i}:a]anull[a]" if bg_i!=-1 else (f"anullsrc=r=44100:cl=stereo[a]" if self.mute_var.get() else f"[0:a]{a_s}[a]")
+        # Audio stream construction
+        a_parts = []
+        mix_inputs = []
+        
+        # 1. Process original if not muted
+        if not self.mute_var.get():
+            a_parts.append(f"[0:a]volume={v_orig},{a_s}[a_orig]")
+            mix_inputs.append("[a_orig]")
+            
+        # 2. Process BGM if present
+        if bg_i != -1:
+            a_parts.append(f"[{bg_i}:a]volume={v_bgm}[a_bgm]")
+            mix_inputs.append("[a_bgm]")
+            
+        # 3. Combine
+        if len(mix_inputs) == 2:
+            a_res = f"{';'.join(a_parts)};{''.join(mix_inputs)}amix=inputs=2:duration=first:dropout_transition=0[a]"
+        elif len(mix_inputs) == 1:
+            a_res = f"{a_parts[0]};{mix_inputs[0]}anull[a]"
+        else:
+            a_res = "anullsrc=r=44100:cl=stereo[a]"
+            
         return v_res, a_res
 
     def start_processing(self):
@@ -589,8 +627,8 @@ class WatermarkApp:
             if si: si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             
             try:
-                # Capture stderr for better error reporting
-                result = subprocess.run(cmd, startupinfo=si, capture_output=True, text=True)
+                # Capture stderr for better error reporting - fix Unicode issues
+                result = subprocess.run(cmd, startupinfo=si, capture_output=True, text=True, encoding='utf-8', errors='replace')
                 if result.returncode != 0:
                     raise Exception(result.stderr)
             except Exception as e:
