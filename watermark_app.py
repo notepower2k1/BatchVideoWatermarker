@@ -5,6 +5,7 @@ import subprocess
 import os
 import time
 import sys
+import json
 import imageio_ffmpeg
 import cv2
 from PIL import Image, ImageTk, ImageDraw, ImageFont
@@ -42,13 +43,20 @@ class WatermarkApp:
         self.wm_effect_var = tk.StringVar(value="None")
         self.wm_start_time_var = tk.StringVar(value="0")
         self.wm_end_time_var = tk.StringVar(value="")
+        self.text_color_var = tk.StringVar(value="#FFFFFF")
+        self.text_size_var = tk.IntVar(value=80)
+        self.font_var = tk.StringVar(value="Arial")
         self.preview_bg_img = None
+        
+        self.config_path = os.path.join(os.path.dirname(__file__), "config.json")
+        self.history_wm = []
         
         # Registration for numeric validation
         self._vcmd = (self.root.register(self.validate_numeric), '%P')
 
         # UI Elements
         self.setup_ui()
+        self.load_config()
         
     def validate_numeric(self, P):
         if P == "" or P == ".":
@@ -67,10 +75,26 @@ class WatermarkApp:
         self.main_container = tk.Frame(self.root, padx=10, pady=10)
         self.main_container.pack(fill="both", expand=True)
 
-        # ---------------- SIDEBAR (Left Column) ---------------- #
-        self.sidebar_frame = tk.Frame(self.main_container, width=380)
-        self.sidebar_frame.pack(side="left", fill="y", padx=(0, 10))
-        self.sidebar_frame.pack_propagate(False)
+        # ---------------- SIDEBAR (Left Column) with Scrollbar ---------------- #
+        self.sidebar_outer = tk.Frame(self.main_container, width=380)
+        self.sidebar_outer.pack(side="left", fill="y", padx=(0, 10))
+        self.sidebar_outer.pack_propagate(False)
+
+        self.sidebar_canvas = tk.Canvas(self.sidebar_outer, borderwidth=0, highlightthickness=0)
+        self.sidebar_scrollbar = ttk.Scrollbar(self.sidebar_outer, orient="vertical", command=self.sidebar_canvas.yview)
+        # Increase width slightly to account for scrollbar visibility and padding
+        self.sidebar_frame = tk.Frame(self.sidebar_canvas)
+
+        self.sidebar_frame.bind("<Configure>", lambda e: self.sidebar_canvas.configure(scrollregion=self.sidebar_canvas.bbox("all")))
+        self.sidebar_canvas.create_window((0, 0), window=self.sidebar_frame, anchor="nw", width=360)
+        self.sidebar_canvas.configure(yscrollcommand=self.sidebar_scrollbar.set)
+
+        self.sidebar_canvas.pack(side="left", fill="both", expand=True)
+        self.sidebar_scrollbar.pack(side="right", fill="y")
+        
+        # Mousewheel support for sidebar
+        def _on_mousewheel(event): self.sidebar_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+        self.sidebar_canvas.bind_all("<MouseWheel>", _on_mousewheel)
 
         # 1. VIDEO SETTINGS BLOCK
         frame_video_group = tk.LabelFrame(self.sidebar_frame, text="VIDEO SETTINGS", padx=10, pady=10, fg="blue", font=("Arial", 10, "bold"))
@@ -127,11 +151,16 @@ class WatermarkApp:
         frame_wm_group.pack(fill="x", pady=(0, 10))
 
         # Preview Logo
-        wm_info = tk.Frame(frame_wm_group)
-        wm_info.pack(fill="x", pady=(0, 5))
-        self.lbl_wm_preview = tk.Label(wm_info, text="None", bg="lightgray", width=6, height=3)
-        self.lbl_wm_preview.pack(side="left", padx=(0, 10))
-        self.lbl_watermark = tk.Label(wm_info, text="No mark selected", fg="gray", anchor="w", font=("Arial", 8), wraplength=130)
+        wm_info2 = tk.Frame(frame_wm_group)
+        wm_info2.pack(fill="x", pady=(0, 5))
+        # Fixed size container to prevent UI layout shifts
+        self.wm_preview_container = tk.Frame(wm_info2, width=80, height=80, bg="lightgray")
+        self.wm_preview_container.pack(side="left", padx=(0, 10))
+        self.wm_preview_container.pack_propagate(False)
+        self.lbl_wm_preview = tk.Label(self.wm_preview_container, bg="lightgray")
+        self.lbl_wm_preview.pack(fill="both", expand=True)
+        
+        self.lbl_watermark = tk.Label(wm_info2, text="No mark selected", fg="gray", anchor="w", font=("Arial", 8), wraplength=130)
         self.lbl_watermark.pack(side="left", fill="x", expand=True)
 
         # Notebook tabs
@@ -151,7 +180,41 @@ class WatermarkApp:
         ttk.Label(t_box, text="Text:").grid(row=0, column=0, padx=2)
         self.text_var = tk.StringVar(value="Sample")
         ttk.Entry(t_box, textvariable=self.text_var, width=12).grid(row=0, column=1, sticky="ew")
-        ttk.Button(self.tab_text, text="Apply Text Logo", command=self.generate_text_watermark).pack(fill="x", padx=5, pady=2)
+        
+        c_box = tk.Frame(self.tab_text)
+        c_box.pack(fill="x", padx=5)
+        ttk.Label(c_box, text="Size:").pack(side="left")
+        ttk.Entry(c_box, textvariable=self.text_size_var, width=5).pack(side="left", padx=2)
+        ttk.Button(c_box, text="Pick Color", command=self.pick_color).pack(side="left", padx=2)
+        # Visual color preview box
+        self.lbl_color_box = tk.Label(c_box, width=3, height=1, relief="raised", bg=self.text_color_var.get())
+        self.lbl_color_box.pack(side="left", padx=5)
+        ttk.Label(c_box, textvariable=self.text_color_var).pack(side="left")
+
+        f_box = tk.Frame(self.tab_text, pady=2)
+        f_box.pack(fill="x", padx=5)
+        ttk.Label(f_box, text="Font:").pack(side="left")
+        try:
+            import tkinter.font as tkfont
+            all_fonts = sorted(list(set(tkfont.families())))
+            priority = ["Arial", "Preuksa", "Montserrat", "Roboto", "Calibri", "Segoe UI", "Tahoma", "Times New Roman"]
+            # Force add requested fonts to list even if not in system fonts for Pillow to find
+            avail = [f for f in priority if f in all_fonts] + [f for f in ["Preuksa", "Montserrat", "Roboto"] if f not in all_fonts] + sorted([f for f in all_fonts if f not in priority])
+        except: avail = ["Arial", "Preuksa", "Montserrat", "Roboto", "Courier", "Times"]
+        
+        self.font_cb = ttk.Combobox(f_box, textvariable=self.font_var, values=avail[:150], state="readonly", width=20)
+        self.font_cb.pack(side="left", fill="x", expand=True, padx=2)
+        self.font_cb.bind("<<ComboboxSelected>>", lambda e: self.save_config())
+
+        ttk.Button(self.tab_text, text="Apply Text Logo", command=self.generate_text_watermark).pack(fill="x", padx=5, pady=5)
+        
+        # Recent History
+        h_frame = tk.Frame(frame_wm_group)
+        h_frame.pack(fill="x", pady=5)
+        ttk.Label(h_frame, text="Recent:").pack(side="left")
+        self.cb_history = ttk.Combobox(h_frame, state="readonly", width=30)
+        self.cb_history.pack(side="left", fill="x", expand=True, padx=5)
+        self.cb_history.bind("<<ComboboxSelected>>", self.on_history_selected)
         
         ttk.Button(frame_wm_group, text="X Clear Watermark", command=self.clear_watermark_selection).pack(fill="x", pady=2)
 
@@ -215,6 +278,8 @@ class WatermarkApp:
         self.progress_bar.pack(fill="x", pady=5)
         self.btn_start = ttk.Button(frame_actions, text="🚀 START PROCESS", command=self.start_processing)
         self.btn_start.pack(fill="x", ipady=10)
+        
+        ttk.Button(frame_actions, text="Reset All Settings", command=self.reset_settings).pack(fill="x", pady=(5,0))
 
         # ---------------- PLAYER PREVIEW (Right) ---------------- #
         frame_preview = tk.LabelFrame(self.main_container, text="Video Preview (Drag logo to position)", padx=5, pady=5)
@@ -319,9 +384,10 @@ class WatermarkApp:
         ret, frame = self.video_cap.read()
         if ret:
             c_w, c_h = max(10, self.canvas_preview.winfo_width()), max(10, self.canvas_preview.winfo_height())
-            v_w = self.video_cap.get(cv2.CAP_PROP_FRAME_WIDTH)
-            self.orig_v_width = v_w
+            # Use actual frame dimensions as source of truth
             h, w = frame.shape[:2]
+            v_w = w
+            self.orig_v_width = v_w
             sc = min(c_w/w, c_h/h)
             new_w, new_h = int(w*sc), int(h*sc)
             if new_w > 0 and new_h > 0:
@@ -371,11 +437,11 @@ class WatermarkApp:
                     r,g,b,a = wm.split()
                     wm = Image.merge("RGBA", (r,g,b,a.point(lambda p: int(p*max(0,min(1,opa))))))
                 vsc = self.bg_width / v_w if v_w > 0 else 1.0
-                ww, wh = int(wm.size[0]*vsc), int(wm.size[1]*vsc)
+                ww, wh = wm.size[0]*vsc, wm.size[1]*vsc
                 if ww>0 and wh>0:
-                    wm = wm.resize((ww, wh), Image.Resampling.NEAREST if fast_mode else Image.Resampling.LANCZOS)
-                    self.preview_wm_img = ImageTk.PhotoImage(wm)
-                    pad = 10*vsc
+                    wm_resized = wm.resize((int(ww), int(wh)), Image.Resampling.NEAREST if fast_mode else Image.Resampling.LANCZOS)
+                    self.preview_wm_img = ImageTk.PhotoImage(wm_resized)
+                    pad = 10.0 * vsc
                     px, py = pad, pad
                     if pos == "Top Right": px = self.bg_width-ww-pad
                     elif pos == "Bottom Left": py = self.bg_height-wh-pad
@@ -413,16 +479,21 @@ class WatermarkApp:
             try:
                 img = Image.open(self.watermark_file).copy(); img.thumbnail((80,80), Image.Resampling.LANCZOS)
                 self.wm_preview_img = ImageTk.PhotoImage(img)
-                self.lbl_wm_preview.config(image=self.wm_preview_img, text="", width=0, height=0)
-            except: self.lbl_wm_preview.config(image='', text="Error", width=6, height=3)
+                self.lbl_wm_preview.config(image=self.wm_preview_img, text="")
+            except: self.lbl_wm_preview.config(image='', text="Error")
 
     def select_watermark(self):
         f = filedialog.askopenfilename(title="Watermark", filetypes=(("Image","*.png *.jpg *.jpeg"),("All","*.*")))
-        if f: self.watermark_file=f; self.lbl_watermark.config(text=os.path.basename(f), fg="black"); self.update_wm_preview(); self.refresh_preview()
+        if f: 
+            self.watermark_file=f
+            self.lbl_watermark.config(text=os.path.basename(f), fg="black")
+            self.update_wm_preview()
+            self.update_history(f)
+            self.refresh_preview()
 
-    def on_wm_tab_changed(self, e): self.clear_watermark_selection()
+    def on_wm_tab_changed(self, e): pass
     def clear_watermark_selection(self):
-        self.watermark_file = ""; self.lbl_watermark.config(text="No image", fg="gray"); self.wm_preview_img=None; self.lbl_wm_preview.config(image='', text="None", width=6, height=3); self.refresh_preview()
+        self.watermark_file = ""; self.lbl_watermark.config(text="No image", fg="gray"); self.wm_preview_img=None; self.lbl_wm_preview.config(image='', text="None"); self.refresh_preview()
 
     def select_bgm(self):
         f = filedialog.askopenfilename(title="Music", filetypes=(("Audio","*.mp3 *.wav *.m4a *.aac"),("All","*.*")))
@@ -477,31 +548,76 @@ class WatermarkApp:
 
     def pick_color(self):
         c = colorchooser.askcolor(title="Color", initialcolor=self.text_color_var.get())
-        if c and c[1]: self.text_color_var.set(c[1])
+        if c and c[1]: 
+            self.text_color_var.set(c[1])
+            self.lbl_color_box.config(bg=c[1])
 
     def generate_text_watermark(self):
         txt = self.text_var.get()
         if not txt: return
-        try: font = ImageFont.truetype("arial.ttf", 80)
+        f_name = self.font_var.get()
+        try:
+            try: font = ImageFont.truetype(f_name, self.text_size_var.get())
+            except: 
+                f_map = {"Arial": "arial.ttf", "Times New Roman": "times.ttf", "Courier New": "cour.ttf"}
+                font = ImageFont.truetype(f_map.get(f_name, "arial.ttf"), self.text_size_var.get())
         except: font = ImageFont.load_default()
+        
         dr = ImageDraw.Draw(Image.new("RGBA", (1,1)))
         try: bb = dr.textbbox((0,0), txt, font=font); w, h = bb[2]-bb[0], bb[3]-bb[1]
         except: w, h = dr.textsize(txt, font=font)
         img = Image.new("RGBA", (w+20, h+20), (255,255,255,0))
-        ImageDraw.Draw(img).text((10,10), txt, fill="white", font=font)
+        ImageDraw.Draw(img).text((10,10), txt, fill=self.text_color_var.get(), font=font)
         p = os.path.join(os.path.dirname(__file__), "watermark_app_temp_text.png")
-        img.save(p); self.watermark_file=p; self.lbl_watermark.config(text=f"Text: {txt[:15]}...", fg="black"); self.update_wm_preview(); self.refresh_preview()
+        img.save(p)
+        self.watermark_file=p
+        self.lbl_watermark.config(text=f"Text: {txt[:15]}...", fg="black")
+        self.update_wm_preview()
+        self.update_history(f"TEXT:{txt}")
+        self.refresh_preview()
+
+    def update_history(self, item):
+        if item in self.history_wm: self.history_wm.remove(item)
+        self.history_wm.insert(0, item)
+        self.history_wm = self.history_wm[:10]
+        self.cb_history['values'] = [os.path.basename(i) if not i.startswith("TEXT:") else i for i in self.history_wm]
+        self.save_config()
+
+    def on_history_selected(self, e):
+        idx = self.cb_history.current()
+        if idx == -1: return
+        item = self.history_wm[idx]
+        if item.startswith("TEXT:"):
+            txt = item[5:]
+            self.text_var.set(txt)
+            self.generate_text_watermark()
+        else:
+            if os.path.exists(item):
+                self.watermark_file = item
+                self.lbl_watermark.config(text=os.path.basename(item), fg="black")
+                self.update_wm_preview()
+                self.refresh_preview()
+            else:
+                messagebox.showerror("Error", "File no longer exists.")
+                # Remove from history and update UI
+                if item in self.history_wm: self.history_wm.remove(item)
+                self.cb_history['values'] = [os.path.basename(i) if not i.startswith("TEXT:") else i for i in self.history_wm]
+                self.save_config()
 
     def select_output_dir(self):
         d = filedialog.askdirectory(title="Output")
-        if d: self.output_dir=d; self.lbl_output.config(text=d, fg="black")
+        if d: 
+            self.output_dir=d
+            self.lbl_output.config(text=d, fg="black")
+            self.save_config()
     def open_output_dir(self):
         if self.output_dir: os.startfile(self.output_dir) if os.name=='nt' else subprocess.call(['xdg-open', self.output_dir])
 
     def get_ffmpeg_complex_filter_str(self, vid_dur=0):
         p, pad = self.position_var.get(), 10
-        target_x = {"Top Left":f"{pad}", "Top Right":f"W-w-{pad}", "Bottom Left":f"{pad}", "Bottom Right":f"W-w-{pad}", "Center":"(W-w)/2"}.get(p, f"W*{self.custom_x_ratio}")
-        target_y = {"Top Left":f"{pad}", "Top Right":f"{pad}", "Bottom Left":f"H-h-{pad}", "Bottom Right":f"H-h-{pad}", "Center":"(H-h)/2"}.get(p, f"H*{self.custom_y_ratio}")
+        # Use high precision for custom ratios to avoid position drift
+        target_x = {"Top Left":f"{pad}", "Top Right":f"W-w-{pad}", "Bottom Left":f"{pad}", "Bottom Right":f"W-w-{pad}", "Center":"(W-w)/2"}.get(p, f"W*{self.custom_x_ratio:.6f}")
+        target_y = {"Top Left":f"{pad}", "Top Right":f"{pad}", "Bottom Left":f"H-h-{pad}", "Bottom Right":f"H-h-{pad}", "Center":"(H-h)/2"}.get(p, f"H*{self.custom_y_ratio:.6f}")
         
         flt = ["format=rgba"]
         usc = self.scale_var.get()/100.0
@@ -640,6 +756,51 @@ class WatermarkApp:
         self.root.after(0, lambda: (self.lbl_status.config(text="Completed!", fg="green"), self.btn_start.config(state="normal"), self.open_output_dir(), messagebox.showinfo("Success", "Batch processing finished. Output folder opened.")))
 
     def fmt_time(self, s): mins, secs = int(max(0,s)//60), int(max(0,s)%60); return f"{mins:02d}:{secs:02d}"
+
+    def load_config(self):
+        if os.path.exists(self.config_path):
+            try:
+                with open(self.config_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    self.output_dir = data.get("output_dir", "")
+                    if self.output_dir: self.lbl_output.config(text=self.output_dir, fg="black")
+                    self.history_wm = data.get("history_wm", [])
+                    self.cb_history['values'] = [os.path.basename(i) if not i.startswith("TEXT:") else i for i in self.history_wm]
+                    last_f = data.get("font_family", "Arial")
+                    if last_f: self.font_var.set(last_f)
+            except: pass
+
+    def save_config(self):
+        data = {"output_dir": self.output_dir, "history_wm": self.history_wm, "font_family": self.font_var.get()}
+        try:
+            with open(self.config_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=4)
+        except: pass
+
+    def reset_settings(self):
+        if not messagebox.askyesno("Reset", "Clear all settings and files?"): return
+        self.video_files = []
+        self.listbox_videos.delete(0, tk.END)
+        self.clear_watermark_selection()
+        self.clear_bgm()
+        self.format_var.set("Original")
+        self.quality_var.set("Medium (Balanced)")
+        self.speed_var.set("1x (Normal)")
+        self.v_fade_var.set("None")
+        self.position_var.set("Bottom Right")
+        self.scale_var.set(100)
+        self.opacity_var.set(100)
+        self.orig_vol_var.set(100)
+        self.bgm_vol_var.set(100)
+        self.wm_effect_var.set("None")
+        self.wm_start_time_var.set("0")
+        self.wm_end_time_var.set("")
+        self.mute_var.set(False)
+        self.lbl_status.config(text="Ready", fg="blue")
+        self.progress_var.set(0)
+        if self.video_cap: self.video_cap.release(); self.video_cap = None
+        self.clear_preview("Select a video\nto preview")
+        messagebox.showinfo("Reset", "Settings wiped.")
 
 if __name__ == "__main__":
     root = tk.Tk(); app = WatermarkApp(root); root.mainloop()
