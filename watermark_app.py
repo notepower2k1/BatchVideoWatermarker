@@ -87,7 +87,7 @@ class WatermarkApp:
         self.main_container.pack(fill="both", expand=True)
 
         # ---------------- SIDEBAR (Left Column) with Scrollbar ---------------- #
-        self.sidebar_outer = tk.Frame(self.main_container, width=340)
+        self.sidebar_outer = tk.Frame(self.main_container, width=420)
         self.sidebar_outer.pack(side="left", fill="y", padx=(0, 10))
         self.sidebar_outer.pack_propagate(False)
 
@@ -97,7 +97,7 @@ class WatermarkApp:
         self.sidebar_frame = tk.Frame(self.sidebar_canvas)
 
         self.sidebar_frame.bind("<Configure>", lambda e: self.sidebar_canvas.configure(scrollregion=self.sidebar_canvas.bbox("all")))
-        self.sidebar_canvas.create_window((0, 0), window=self.sidebar_frame, anchor="nw", width=360)
+        self.sidebar_canvas.create_window((0, 0), window=self.sidebar_frame, anchor="nw", width=390)
         self.sidebar_canvas.configure(yscrollcommand=self.sidebar_scrollbar.set)
 
         self.sidebar_canvas.pack(side="left", fill="both", expand=True)
@@ -271,8 +271,10 @@ class WatermarkApp:
         
         a_btns = tk.Frame(frame_audio)
         a_btns.pack(fill="x")
-        ttk.Button(a_btns, text="Set Music", command=self.select_bgm).pack(side="left", fill="x", expand=True)
-        ttk.Button(a_btns, text="X", command=self.clear_bgm, width=3).pack(side="left", padx=2)
+        self.btn_select_bgm = ttk.Button(a_btns, text="Set Music", command=self.select_bgm)
+        self.btn_select_bgm.pack(side="left", fill="x", expand=True)
+        self.btn_clear_bgm = ttk.Button(a_btns, text="X", command=self.clear_bgm, width=3)
+        self.btn_clear_bgm.pack(side="left", padx=2)
         
         v_box = tk.Frame(frame_audio, pady=5)
         v_box.pack(fill="x")
@@ -313,7 +315,8 @@ class WatermarkApp:
         self.btn_play_pause = ttk.Button(ctrls, text="▶ Play", command=self.toggle_play, width=10)
         self.btn_play_pause.pack(side="left")
         
-        ttk.Button(ctrls, text="⏹ Stop", command=self.stop_playback, width=8).pack(side="left", padx=5)
+        self.btn_stop = ttk.Button(ctrls, text="⏹ Stop", command=self.stop_playback, width=8)
+        self.btn_stop.pack(side="left", padx=5)
         self.btn_audio_preview = ttk.Button(ctrls, text="🔊 Play with Audio", command=self.preview_with_audio, width=18)
         self.btn_audio_preview.pack(side="left", padx=5)
         
@@ -882,6 +885,13 @@ class WatermarkApp:
             self.btn_apply_text_wm.config(state=state)
             self.btn_clear_wm.config(state=state)
             self.cb_history.config(state="readonly" if state=="normal" else "disabled")
+            self.btn_play_pause.config(state=state)
+            self.btn_stop.config(state=state)
+            self.btn_audio_preview.config(state=state)
+            self.seek_slider.config(state=state)
+            self.btn_start.config(state=state)
+            self.btn_select_bgm.config(state=state)
+            self.btn_clear_bgm.config(state=state)
         except: pass
 
 if __name__ == "__main__":

@@ -4,3 +4,6 @@
 /temp_previews
 /config.json
 watermark_app_temp_text.png
+/build
+/dist
+/*.spec
