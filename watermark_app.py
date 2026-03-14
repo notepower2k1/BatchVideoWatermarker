@@ -9,6 +9,7 @@ import json
 import imageio_ffmpeg
 import cv2
 from PIL import Image, ImageTk, ImageDraw, ImageFont
+import tempfile
 
 class WatermarkApp:
     def __init__(self, root):
@@ -57,6 +58,7 @@ class WatermarkApp:
         self.font_var = tk.StringVar(value="Arial")
         self.rotate_var = tk.DoubleVar(value=0)
         self.preview_bg_img = None
+        self.process_selected_var = tk.BooleanVar(value=False)
         
         self.config_path = os.path.join(os.path.dirname(__file__), "config.json")
         self.history_wm = []
@@ -117,7 +119,7 @@ class WatermarkApp:
         
         l_box_frame = tk.Frame(frame_list)
         l_box_frame.pack(fill="x", expand=True)
-        self.listbox_videos = tk.Listbox(l_box_frame, selectmode=tk.BROWSE, height=4, exportselection=False)
+        self.listbox_videos = tk.Listbox(l_box_frame, selectmode=tk.EXTENDED, height=4, exportselection=False)
         self.listbox_videos.pack(side="left", fill="x", expand=True)
         scrollbar = tk.Scrollbar(l_box_frame, orient="vertical", command=self.listbox_videos.yview)
         scrollbar.pack(side="right", fill="y")
@@ -295,6 +297,9 @@ class WatermarkApp:
         self.progress_var = tk.DoubleVar()
         self.progress_bar = ttk.Progressbar(frame_actions, variable=self.progress_var, maximum=100)
         self.progress_bar.pack(fill="x", pady=5)
+        
+        tk.Checkbutton(frame_actions, text="Process Selected Only", variable=self.process_selected_var).pack(anchor="w")
+        
         self.btn_start = ttk.Button(frame_actions, text="🚀 START PROCESS", command=self.start_processing)
         self.btn_start.pack(fill="x", ipady=10)
         
@@ -363,11 +368,13 @@ class WatermarkApp:
     def remove_videos(self):
         selected = self.listbox_videos.curselection()
         if not selected: return
-        idx = selected[0]
-        self.listbox_videos.delete(idx)
-        del self.video_files[idx]
+        # Remove from bottom to top to keep indices valid
+        for idx in reversed(selected):
+            self.listbox_videos.delete(idx)
+            del self.video_files[idx]
+        
         if len(self.video_files) > 0:
-            new_idx = min(idx, len(self.video_files)-1)
+            new_idx = min(selected[0], len(self.video_files)-1)
             self.listbox_videos.select_set(new_idx)
             self.show_preview(None)
         else:
@@ -562,7 +569,7 @@ class WatermarkApp:
 
     def _run_audio_preview_render(self, path):
         exe = imageio_ffmpeg.get_ffmpeg_exe()
-        tmp = os.path.join(os.path.dirname(__file__), "temp_previews")
+        tmp = os.path.join(tempfile.gettempdir(), "video_watermarker_previews")
         if not os.path.exists(tmp): os.makedirs(tmp)
         out = os.path.join(tmp, "preview_sample.mp4")
 
@@ -575,7 +582,8 @@ class WatermarkApp:
         # In preview we only render 10s. If original is longer, fade out won't show unless we cap it.
         dur_v = min(10.0, raw_dur / spd)
         
-        v_f, a_f = self.get_ffmpeg_complex_filter_str(dur_v)
+        has_audio = self.check_has_audio(path)
+        v_f, a_f = self.get_ffmpeg_complex_filter_str(dur_v, has_audio=has_audio)
         cmd = [exe, "-y", "-i", path]
         if self.watermark_file:
             ext_wm = os.path.splitext(self.watermark_file)[1].lower()
@@ -584,7 +592,7 @@ class WatermarkApp:
             else:
                 cmd.extend(["-i", self.watermark_file])
         if self.bgm_file: cmd.extend(["-stream_loop", "-1", "-i", self.bgm_file])
-        cmd.extend(["-filter_complex", f"{v_f};{a_f}", "-map", "[v]", "-map", "[a]", "-t", "10", "-shortest", "-preset", "ultrafast", out])
+        cmd.extend(["-filter_complex", f"{v_f};{a_f}", "-map", "[v]", "-map", "[a]", "-t", "10", "-shortest", "-c:v", "libx264", "-profile:v", "high", "-pix_fmt", "yuv420p", "-preset", "ultrafast", "-c:a", "aac", "-b:a", "128k", "-ar", "44100", out])
         si = subprocess.STARTUPINFO() if os.name=='nt' else None
         if si: si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         try:
@@ -598,6 +606,98 @@ class WatermarkApp:
     def on_transform_changed(self, e=None): self.refresh_preview()
     def refresh_preview(self): 
         if self.video_cap and self.preview_bg_img: self.draw_preview_canvas(self.watermark_file, self.position_var.get(), self.orig_v_width)
+
+    def open_output_dir(self):
+        if self.output_dir: os.startfile(self.output_dir) if os.name=='nt' else subprocess.call(['xdg-open', self.output_dir])
+
+    def get_ffmpeg_complex_filter_str(self, vid_dur=0, has_audio=True):
+        p, pad = self.position_var.get(), 10
+        target_x = {"Top Left": f"{pad}", "Top Right": f"W-w-{pad}", "Bottom Left": f"{pad}", "Bottom Right": f"W-w-{pad}", "Center": "(W-w)/2"}.get(p, f"W*{self.custom_x_ratio:.6f}")
+        target_y = {"Top Left": f"{pad}", "Top Right": f"{pad}", "Bottom Left": f"H-h-{pad}", "Bottom Right": f"H-h-{pad}", "Center": "(H-h)/2"}.get(p, f"H*{self.custom_y_ratio:.6f}")
+        
+        flt = ["format=rgba"]
+        usc = self.scale_var.get()/100.0
+        if usc != 1.0: 
+            # Force even dimensions for hardware compatibility (iPhone/Android)
+            flt.append(f"scale=trunc(iw*{usc}/2)*2:trunc(ih*{usc}/2)*2")
+        
+        rot = self.rotate_var.get()
+        if rot != 0:
+            rad = f"({rot}*PI/180)"
+            flt.append(f"rotate={rad}:c=none:ow='iw*abs(cos({rad}))+ih*abs(sin({rad}))':oh='iw*abs(sin({rad}))+ih*abs(cos({rad}))'")
+
+        st, ed = 0, 999999
+        try:
+            st = float(self.wm_start_time_var.get() or 0)
+            ed_val = self.wm_end_time_var.get().strip()
+            if ed_val: ed = float(ed_val)
+        except: pass
+
+        wm_eff = self.wm_effect_var.get()
+        if wm_eff == "Fade":
+            flt.append(f"fade=t=in:st={st}:d=0.5:alpha=1")
+            if ed < 999998: flt.append(f"fade=t=out:st={ed-0.5}:d=0.5:alpha=1")
+        
+        opa = self.opacity_var.get()/100.0
+        if opa < 1.0: flt.append(f"colorchannelmixer=aa={opa}")
+            
+        en = f"enable='between(t,{st},{ed})'"
+        wm_x = f"'{target_x}'"
+        wm_y = f"'{target_y}'"
+        d = 0.5
+        
+        if wm_eff == "Fly In (L)":
+            wm_x = f"'if(lt(t,{st}+{d}), -w+(t-{st})/{d}*({target_x}+w), {target_x})'"
+        elif wm_eff == "Fly In (R)":
+            wm_x = f"'if(lt(t,{st}+{d}), W+(t-{st})/{d}*({target_x}-W), {target_x})'"
+
+        spd = float(self.speed_var.get().split('x')[0])
+        # Force constant 30 FPS to avoid "strange FPS" issues on iPhone/Android
+        v_flt_base = f"setpts={1/spd}*PTS"
+        
+        v_eff = self.v_fade_var.get()
+        if v_eff == "Fade In" or v_eff == "Both": v_flt_base += ",fade=t=in:st=0:d=1"
+        if (v_eff == "Fade Out" or v_eff == "Both") and vid_dur > 0: v_flt_base += f",fade=t=out:st={vid_dur-1}:d=1"
+
+        v_orig, v_bgm = self.orig_vol_var.get()/100.0, self.bgm_vol_var.get()/100.0
+        
+        tmp_s = spd
+        tempo_f = []
+        while tmp_s>2.0: tempo_f.append("atempo=2.0"); tmp_s/=2.0
+        while tmp_s<0.5: tempo_f.append("atempo=0.5"); tmp_s*=2.0
+        if tmp_s!=1.0: tempo_f.append(f"atempo={tmp_s}")
+        a_s = ",".join(tempo_f) if tempo_f else "anull"
+
+        wm_i = 1 if self.watermark_file else -1
+        bg_i = (wm_i+1) if self.bgm_file and wm_i!=-1 else (1 if self.bgm_file else -1)
+        
+        if wm_i != -1:
+            overlay_str = f"overlay=x={wm_x}:y={wm_y}:{en}"
+            v_res = f"[{wm_i}:v]{','.join(flt)}[wm];[0:v]{v_flt_base}[vs];[vs][wm]{overlay_str}[v]"
+        else: v_res = f"[0:v]{v_flt_base}[v]"
+            
+        a_parts, mix_inputs = [], []
+        if has_audio:
+            # Use a tiny volume instead of absolute 0 to trick the AAC encoder 
+            # into maintaining a high bitrate (prevents the 2kb/s issue).
+            v_actual = 0.00001 if self.mute_var.get() else v_orig
+            a_parts.append(f"[0:a]aresample=44100,aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,volume={v_actual},{a_s}[a_orig]")
+            mix_inputs.append("[a_orig]")
+            
+        if bg_i != -1:
+            a_parts.append(f"[{bg_i}:a]aresample=44100,aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,volume={v_bgm}[a_bgm]")
+            mix_inputs.append("[a_bgm]")
+            
+        if len(mix_inputs) == 2:
+            a_res = f"{';'.join(a_parts)};{''.join(mix_inputs)}amix=inputs=2:duration=first:dropout_transition=0[a]"
+        elif len(mix_inputs) == 1:
+            a_res = f"{a_parts[0]};{mix_inputs[0]}anull[a]"
+        else:
+            # Explicitly set duration and format to avoid 2kb/s issues on iPhone
+            dur_a = vid_dur if vid_dur > 0 else 1
+            a_res = f"anullsrc=channel_layout=stereo:sample_rate=44100:duration={dur_a},aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo[a]"
+            
+        return v_res, a_res
 
     def pick_color(self):
         c = colorchooser.askcolor(title="Color", initialcolor=self.text_color_var.get())
@@ -622,7 +722,7 @@ class WatermarkApp:
         except: w, h = dr.textsize(txt, font=font)
         img = Image.new("RGBA", (w+20, h+20), (255,255,255,0))
         ImageDraw.Draw(img).text((10,10), txt, fill=self.text_color_var.get(), font=font)
-        p = os.path.join(os.path.dirname(__file__), "watermark_app_temp_text.png")
+        p = os.path.join(tempfile.gettempdir(), "watermark_app_temp_text.png")
         img.save(p)
         self.watermark_file=p
         self.lbl_watermark.config(text=f"Text: {txt[:15]}...", fg="black")
@@ -665,118 +765,55 @@ class WatermarkApp:
             self.output_dir=d
             self.lbl_output.config(text=d, fg="black")
             self.save_config()
-    def open_output_dir(self):
-        if self.output_dir: os.startfile(self.output_dir) if os.name=='nt' else subprocess.call(['xdg-open', self.output_dir])
-
-    def get_ffmpeg_complex_filter_str(self, vid_dur=0):
-        p, pad = self.position_var.get(), 10
-        # Target coordinates on the actual video resolution
-        # We use W and H (video dimensions) and w, h (watermark dimensions after its filters)
-        target_x = {"Top Left": f"{pad}", "Top Right": f"W-w-{pad}", "Bottom Left": f"{pad}", "Bottom Right": f"W-w-{pad}", "Center": "(W-w)/2"}.get(p, f"W*{self.custom_x_ratio:.6f}")
-        target_y = {"Top Left": f"{pad}", "Top Right": f"{pad}", "Bottom Left": f"H-h-{pad}", "Bottom Right": f"H-h-{pad}", "Center": "(H-h)/2"}.get(p, f"H*{self.custom_y_ratio:.6f}")
-        
-        flt = ["format=rgba"]
-        usc = self.scale_var.get()/100.0
-        if usc != 1.0: flt.append(f"scale=iw*{usc}:ih*{usc}")
-        
-        rot = self.rotate_var.get()
-        if rot != 0:
-            # Sync FFmpeg's rotation bounding box with PIL's expand=True logic
-            # ow = iw*abs(cos(a)) + ih*abs(sin(a))
-            rad = f"({rot}*PI/180)"
-            flt.append(f"rotate={rad}:c=none:ow='iw*abs(cos({rad}))+ih*abs(sin({rad}))':oh='iw*abs(sin({rad}))+ih*abs(cos({rad}))'")
-
-        st, ed = 0, 999999
+    def check_has_audio(self, path):
+        exe = imageio_ffmpeg.get_ffmpeg_exe()
+        # Fast probe using ffmpeg
+        cmd = [exe, "-hide_banner", "-i", path]
         try:
-            st = float(self.wm_start_time_var.get() or 0)
-            ed_val = self.wm_end_time_var.get().strip()
-            if ed_val: ed = float(ed_val)
-        except: pass
+            res = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='replace')
+            return "Audio:" in res.stderr
+        except: return False
 
-        wm_eff = self.wm_effect_var.get()
-        if wm_eff == "Fade":
-            flt.append(f"fade=t=in:st={st}:d=0.5:alpha=1")
-            if ed < 999998:
-                flt.append(f"fade=t=out:st={ed-0.5}:d=0.5:alpha=1")
-        
-        opa = self.opacity_var.get()/100.0
-        if opa < 1.0: flt.append(f"colorchannelmixer=aa={opa}")
-            
-        en = f"enable='between(t,{st},{ed})'"
-        
-        wm_x = f"'{target_x}'"
-        wm_y = f"'{target_y}'"
-        d = 0.5
-        
-        if wm_eff == "Fly In (L)":
-            wm_x = f"'if(lt(t,{st}+{d}), -w+(t-{st})/{d}*({target_x}+w), {target_x})'"
-        elif wm_eff == "Fly In (R)":
-            wm_x = f"'if(lt(t,{st}+{d}), W+(t-{st})/{d}*({target_x}-W), {target_x})'"
-
-        spd = float(self.speed_var.get().split('x')[0])
-        v_flt_base = f"setpts={1/spd}*PTS"
-        
-        v_eff = self.v_fade_var.get()
-        if v_eff == "Fade In" or v_eff == "Both": v_flt_base += ",fade=t=in:st=0:d=1"
-        if (v_eff == "Fade Out" or v_eff == "Both") and vid_dur > 0: v_flt_base += f",fade=t=out:st={vid_dur-1}:d=1"
-
-        # Audio Processing logic
-        v_orig = self.orig_vol_var.get() / 100.0
-        v_bgm = self.bgm_vol_var.get() / 100.0
-        
-        tmp_s = spd
-        tempo_f = []
-        while tmp_s>2.0: tempo_f.append("atempo=2.0"); tmp_s/=2.0
-        while tmp_s<0.5: tempo_f.append("atempo=0.5"); tmp_s*=2.0
-        if tmp_s!=1.0: tempo_f.append(f"atempo={tmp_s}")
-        a_s = ",".join(tempo_f) if tempo_f else "anull"
-
-        wm_i = 1 if self.watermark_file else -1
-        bg_i = (wm_i+1) if self.bgm_file and wm_i!=-1 else (1 if self.bgm_file else -1)
-        
-        # Video stream
-        if wm_i != -1:
-            overlay_str = f"overlay=x={wm_x}:y={wm_y}:{en}"
-            v_res = f"[{wm_i}:v]{','.join(flt)}[wm];[0:v]{v_flt_base}[vs];[vs][wm]{overlay_str}[v]"
-        else:
-            v_res = f"[0:v]{v_flt_base}[v]"
-            
-        # Audio stream construction
-        a_parts = []
-        mix_inputs = []
-        
-        # 1. Process original if not muted
-        if not self.mute_var.get():
-            a_parts.append(f"[0:a]volume={v_orig},{a_s}[a_orig]")
-            mix_inputs.append("[a_orig]")
-            
-        # 2. Process BGM if present
-        if bg_i != -1:
-            a_parts.append(f"[{bg_i}:a]volume={v_bgm}[a_bgm]")
-            mix_inputs.append("[a_bgm]")
-            
-        # 3. Combine
-        if len(mix_inputs) == 2:
-            a_res = f"{';'.join(a_parts)};{''.join(mix_inputs)}amix=inputs=2:duration=first:dropout_transition=0[a]"
-        elif len(mix_inputs) == 1:
-            a_res = f"{a_parts[0]};{mix_inputs[0]}anull[a]"
-        else:
-            a_res = "anullsrc=r=44100:cl=stereo[a]"
-            
-        return v_res, a_res
 
     def start_processing(self):
-        if not self.video_files or not self.watermark_file or not self.output_dir: messagebox.showerror("Error", "Missing input/output/watermark."); return
-        self.btn_start.config(state="disabled"); self.progress_var.set(0)
-        threading.Thread(target=self.process_videos, daemon=True).start()
-
-    def process_videos(self):
-        exe = imageio_ffmpeg.get_ffmpeg_exe()
-        spd = float(self.speed_var.get().split('x')[0])
-        total = len(self.video_files)
+        missing = []
+        if not self.video_files: missing.append("- Videos input")
+        if not self.output_dir: missing.append("- Output folder (Set Folder)")
         
-        for i, path in enumerate(self.video_files):
-            # Update status for current file
+        if missing:
+            messagebox.showerror("Error", "Please provide:\n" + "\n".join(missing))
+            return
+            
+        settings = {
+            "exe": imageio_ffmpeg.get_ffmpeg_exe(),
+            "spd": float(self.speed_var.get().split('x')[0]),
+            "format": self.format_var.get(),
+            "quality": self.quality_var.get(),
+            "output_dir": self.output_dir,
+            "watermark_file": self.watermark_file,
+            "bgm_file": self.bgm_file,
+            "process_selected": self.process_selected_var.get()
+        }
+        
+        if settings["process_selected"]:
+            sel = self.listbox_videos.curselection()
+            settings["files"] = [self.video_files[i] for i in sel]
+        else:
+            settings["files"] = list(self.video_files)
+
+        if not settings["files"]:
+            messagebox.showwarning("Warning", "No videos to process!")
+            return
+
+        self.btn_start.config(state="disabled"); self.progress_var.set(0)
+        threading.Thread(target=self.process_videos, args=(settings,), daemon=True).start()
+
+    def process_videos(self, cfg):
+        exe = cfg["exe"]
+        spd = cfg["spd"]
+        total = len(cfg["files"])
+        
+        for i, path in enumerate(cfg["files"]):
             fname = os.path.basename(path)
             self.root.after(0, lambda n=fname, idx=i+1: self.lbl_status.config(text=f"Processing ({idx}/{total}): {n}", fg="orange"))
             
@@ -785,23 +822,26 @@ class WatermarkApp:
             dur_raw = cap.get(cv2.CAP_PROP_FRAME_COUNT)/fps_v if fps_v>0 else 1
             cap.release()
             
-            f_v, f_a = self.get_ffmpeg_complex_filter_str(dur_raw/spd)
+            has_audio = self.check_has_audio(path)
+            f_v, f_a = self.get_ffmpeg_complex_filter_str(dur_raw/spd, has_audio=has_audio)
+            
             name, ext = os.path.splitext(fname)
-            out_ext = ext if self.format_var.get()=="Original" else f".{self.format_var.get().lower()}"
-            out = os.path.join(self.output_dir, f"watermarked_{name}{out_ext}")
-            crf = {"Low (Smaller File)":"28", "Medium (Balanced)":"23"}.get(self.quality_var.get(), "18")
+            out_ext = ext if cfg["format"]=="Original" else f".{cfg['format'].lower()}"
+            out = os.path.join(cfg["output_dir"], f"watermarked_{name}{out_ext}")
+            crf = {"Low (Smaller File)":"28", "Medium (Balanced)":"23"}.get(cfg["quality"], "18")
             
             cmd = [exe, "-y", "-i", path]
-            if self.watermark_file:
-                ext_wm = os.path.splitext(self.watermark_file)[1].lower()
+            if cfg["watermark_file"]:
+                ext_wm = os.path.splitext(cfg["watermark_file"])[1].lower()
                 if ext_wm in ['.png', '.jpg', '.jpeg']:
-                    cmd.extend(["-loop", "1", "-i", self.watermark_file])
+                    cmd.extend(["-loop", "1", "-framerate", "30", "-i", cfg["watermark_file"]])
                 else:
-                    cmd.extend(["-i", self.watermark_file])
-            if self.bgm_file: cmd.extend(["-stream_loop", "-1", "-i", self.bgm_file])
+                    cmd.extend(["-i", cfg["watermark_file"]])
+            
+            if cfg["bgm_file"]: cmd.extend(["-stream_loop", "-1", "-i", cfg["bgm_file"]])
             
             target_dur = dur_raw / spd
-            cmd.extend(["-filter_complex", f"{f_v};{f_a}", "-map", "[v]", "-map", "[a]", "-t", f"{target_dur}", "-c:v", "libx264", "-crf", crf, "-preset", "fast", "-c:a", "aac", out])
+            cmd.extend(["-filter_complex", f"{f_v};{f_a}", "-map", "[v]", "-map", "[a]", "-t", f"{target_dur}", "-c:v", "libx264", "-profile:v", "high", "-level", "4.1", "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-crf", crf, "-preset", "fast", "-c:a", "aac", "-b:a", "128k", "-ar", "44100", out])
             
             si = subprocess.STARTUPINFO() if os.name=='nt' else None
             if si: si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
