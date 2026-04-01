@@ -2,82 +2,123 @@
 
 ![User Interface](ui.jpg)
 
-A powerful and user-friendly desktop application to batch process videos by adding custom image or text watermarks. It specifically targets vertical videos (9:16 aspect ratio) but provides a rich set of features to customize watermarks, video formats, and audio.
+Desktop app for batch watermarking videos with image or text overlays. The app supports multiple input aspect ratios, live preview, audio options, and faster export using parallel processing and optional NVIDIA GPU encoding.
 
-## 🌟 Features
+## Screenshots
 
-### 🎬 Video Processing
-- **Batch Processing:** Add and process multiple videos at once.
-- **Format Conversion:** Export videos in Original format, MP4, MKV, AVI, or MOV.
-- **Quality Control:** Choose between High (Lossless), Medium (Balanced), or Low (Smaller File) quality.
-- **Speed Adjustment:** Change video speed (Timelapse or Slow-mo) with presets (0.5x, 1x, 2x, 4x, 8x, 16x).
-- **Video Transitions:** Apply Fade In, Fade Out, or both to the processed video.
+### Full App
 
-### 🖼️ Watermark Customization
-- **Image & Text Watermarks:** Use a custom PNG/JPG logo or generate a text watermark directly in the app.
-- **Text Styling:** Customize text content, color, size, and font (supports system fonts).
-- **Positioning:** Preset positions (Top Left, Top Right, Bottom Left, Bottom Right, Center) or **Custom Positioning via Drag & Drop** directly on the preview window.
-- **Transformations:** Scale (10% to 300%), set Opacity (0% to 100%), and Rotate (0 to 360 degrees).
-- **Timestamping:** Show the watermark only during a specific time interval (Start/End time).
-- **Effects:** Apply entrance animations like Fade or Fly In (Left/Right) to your watermark.
-- **History:** Quickly access recently used image or text watermarks.
+![Full App](docs/ui-overview.jpg)
 
-### 🎵 Audio Settings
-- **Custom Background Music (BGM):** Add your own audio/music file.
-- **Volume Control:** Adjust volumes for both the Original Audio and the new Background Music independently.
-- **Mute Option:** Easily mute the original video audio.
+### Sidebar
 
-### 👁️ Real-time Preview
-- **Interactive Preview:** Watch your video with the watermark applied in real-time before processing.
-- **Player Controls:** Play, Pause, Stop, and seek through the video.
-- **Audio Preview:** Generate a fast 10-second sample to preview how the audio mixing sounds before rendering the entire batch.
+![Sidebar](docs/ui-sidebar.jpg)
 
-## 🛠️ Usage
+### Export And Advanced
 
-1. **Add Videos:** Click `Add Videos` to load your 9:16 vertical videos.
-2. **Select Watermark:** Go to the Watermark tab to load an Image or create a Text watermark.
-3. **Adjust Placements:** Select a preset position or drag the watermark directly on the right-side preview screen.
-4. **Configure Audio (Optional):** Add background music, adjust volume levels, or mute the original track.
-5. **Set Output:** Choose an output folder where the processed files will be saved.
-6. **Start Processing:** Click the `🚀 START PROCESS` button to render all videos in the batch queue.
+![Export And Advanced](docs/ui-export-advanced.jpg)
 
-## 🖥️ User Interface
+### Preview Area
 
-The application is structured into two main sections:
-- **Left Sidebar:** Contains all the configuration options grouped perfectly into Video Settings, Watermark Settings, and Audio Settings.
-- **Right Panel:** A unified video player that allows you to preview the video frames, test transformations in real-time, and graphically reposition your watermark by dragging it around.
+![Preview Area](docs/ui-preview.jpg)
 
-## 🚀 How to Run
+## Features
 
-### 1. Run from Source (Python)
+### Video Processing
+- Batch process multiple videos in one run.
+- Accept common video inputs such as MP4, AVI, MOV, and MKV.
+- Export in Original, MP4, MKV, AVI, or MOV container format.
+- Choose output quality: High, Medium, or Low.
+- Change playback speed with presets from `0.5x` to `16x`.
+- Apply video fade in/out.
 
-Ensure you have Python installed and run the following commands to install the necessary dependencies:
+### Watermark Tools
+- Use an image watermark (`PNG`, `JPG`, `JPEG`) or generate a text watermark inside the app.
+- Adjust watermark position, size, transparency, rotation, timing, and entrance effect.
+- Drag the watermark directly in the preview for custom placement.
+- Reuse recent watermark history.
+
+### Audio
+- Keep original audio, mute it, or mix in background music.
+- Control original audio volume and music volume separately.
+- Generate a short preview sample with audio before full export.
+
+### Performance
+- Process multiple videos in parallel.
+- Auto-tune the number of videos processed at once based on CPU or GPU mode.
+- Support `Auto`, CPU-only, or NVIDIA GPU encoding when available.
+- Copy unchanged audio directly when possible to reduce processing time.
+- Use cached metadata probing to reduce repeated file analysis overhead.
+
+### UI
+- Split into `Videos`, `Watermark`, `Export`, and `Advanced` sections.
+- Live preview with play, stop, seek, and drag-to-position behavior.
+- Advanced settings can be shown or hidden from the export section.
+
+## Typical Workflow
+
+1. Click `Add Videos` and choose the source files.
+2. In `Watermark`, choose either an image or text watermark.
+3. Adjust the watermark in the preview.
+4. In `Export`, choose output format, quality, and output folder.
+5. Optionally open `Advanced` to adjust speed, fade, encoder, audio, or parallel export settings.
+6. Click `Start Export`.
+
+## Run From Source
+
+Install dependencies:
 
 ```bash
 pip install -r requirements.txt
-# Alternatively, install explicitly: pip install imageio-ffmpeg opencv-python pillow
 ```
 
-Then, run the application:
+If you do not have a `requirements.txt`, install the main packages manually:
+
+```bash
+pip install imageio-ffmpeg opencv-python pillow
+```
+
+Run the app:
 
 ```bash
 python watermark_app.py
 ```
 
-### 2. Build as an Executable (.exe)
+## Build Windows Executable
 
-To package this application into a standalone `.exe` file that can be distributed without needing Python installed, you will use `PyInstaller`. 
+This project includes a PyInstaller spec file:
 
-First, ensure `pyinstaller` is installed in your active Python environment:
+- [`Batch Video Watermarker.spec`](/D:/CodingTime/Watermark/Batch%20Video%20Watermarker.spec)
+
+Install PyInstaller:
 
 ```bash
 python -m pip install pyinstaller
 ```
 
-Then, build the standalone executable with this command:
+Build using the spec file:
 
 ```bash
-python -m PyInstaller --noconfirm --onedir --windowed --icon="logo.png" --name "Batch Video Watermarker" --hidden-import imageio_ffmpeg --collect-all imageio_ffmpeg --exclude-module matplotlib --exclude-module scipy --exclude-module IPython --exclude-module notebook --exclude-module PyQt5 --exclude-module PySide2 --exclude-module PySide6 --exclude-module pandas "watermark_app.py"
+python -m PyInstaller "Batch Video Watermarker.spec"
 ```
 
-Once the process finishes, the built application folder will be waiting inside the `dist/Batch Video Watermarker/` directory. You will find `Batch Video Watermarker.exe` inside.
+The built app will be created in:
+
+```text
+dist/Batch Video Watermarker/
+```
+
+## Windows Icon
+
+The app now uses:
+
+- [`logo.png`](/D:/CodingTime/Watermark/logo.png) for the window icon at runtime
+- [`logo.ico`](/D:/CodingTime/Watermark/logo.ico) for the Windows executable and taskbar icon
+
+If you change the branding image, regenerate `logo.ico` before rebuilding the executable.
+
+## Notes
+
+- Output video is re-encoded because watermark overlay requires video processing.
+- Audio is only stream-copied when no audio modification is needed.
+- GPU encoding depends on FFmpeg support and available hardware.

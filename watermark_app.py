@@ -12,6 +12,9 @@ import cv2
 from PIL import Image, ImageTk, ImageDraw, ImageFont
 import tempfile
 import fractions
+import ctypes
+import uuid
+import shutil
 
 class WatermarkApp:
     def __init__(self, root):
@@ -25,15 +28,23 @@ class WatermarkApp:
         self.root.resizable(False, False) # Disable resizing
 
         # Set window icon
-        if os.path.exists("logo.png"):
-            try:
-                self.icon_img = ImageTk.PhotoImage(file="logo.png")
+        try:
+            if os.name == 'nt':
+                app_id = "Watermark.BatchVideoWatermarker"
+                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(app_id)
+                ico_path = os.path.join(os.path.dirname(__file__), "logo.ico")
+                if os.path.exists(ico_path):
+                    self.root.iconbitmap(ico_path)
+            png_path = os.path.join(os.path.dirname(__file__), "logo.png")
+            if os.path.exists(png_path):
+                self.icon_img = ImageTk.PhotoImage(file=png_path)
                 self.root.iconphoto(False, self.icon_img)
-            except:
-                pass
+        except:
+            pass
         
         self.video_files = []
         self.watermark_file = ""
+        self.generated_text_watermark_file = ""
         self.bgm_file = ""
         self.output_dir = ""
         self.custom_x_ratio = 0.0
@@ -64,6 +75,7 @@ class WatermarkApp:
         self.parallel_videos_var = tk.StringVar()
         self.encoder_var = tk.StringVar(value="Auto (Recommended)")
         self.encode_speed_var = tk.StringVar(value="Very Fast (Recommended)")
+        self.show_advanced_var = tk.BooleanVar(value=True)
         self._ffmpeg_encoder_cache = {}
         self._video_metadata_cache = {}
         
@@ -77,6 +89,7 @@ class WatermarkApp:
         self.setup_ui()
         self.update_wm_ui_state()
         self.load_config()
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         
     def validate_numeric(self, P):
         if P == "" or P == ".":
@@ -86,6 +99,62 @@ class WatermarkApp:
             return True
         except ValueError:
             return False
+
+    def cleanup_temp_files(self):
+        temp_dir = tempfile.gettempdir()
+        for name in os.listdir(temp_dir):
+            if name.startswith("watermark_app_temp_text_") and name.endswith(".png"):
+                try:
+                    os.remove(os.path.join(temp_dir, name))
+                except:
+                    pass
+        if self.generated_text_watermark_file and os.path.exists(self.generated_text_watermark_file):
+            try:
+                os.remove(self.generated_text_watermark_file)
+            except:
+                pass
+        self.generated_text_watermark_file = ""
+
+        preview_dir = os.path.join(temp_dir, "video_watermarker_previews")
+        if os.path.isdir(preview_dir):
+            try:
+                shutil.rmtree(preview_dir, ignore_errors=True)
+            except:
+                pass
+
+        legacy_temp_files = [
+            os.path.join(os.path.dirname(__file__), "watermark_app_temp_text.png"),
+            os.path.join(os.path.dirname(__file__), "temp_previews", "preview_sample.mp4"),
+        ]
+        for path in legacy_temp_files:
+            if os.path.exists(path):
+                try:
+                    os.remove(path)
+                except:
+                    pass
+        legacy_preview_dir = os.path.join(os.path.dirname(__file__), "temp_previews")
+        if os.path.isdir(legacy_preview_dir):
+            try:
+                if not os.listdir(legacy_preview_dir):
+                    os.rmdir(legacy_preview_dir)
+            except:
+                pass
+
+    def on_close(self):
+        try:
+            if self.play_job:
+                self.root.after_cancel(self.play_job)
+                self.play_job = None
+        except:
+            pass
+        try:
+            if self.video_cap:
+                self.video_cap.release()
+                self.video_cap = None
+        except:
+            pass
+        self.cleanup_temp_files()
+        self.root.destroy()
 
     def get_auto_parallel_count(self):
         cpu_count = os.cpu_count() or 2
@@ -111,6 +180,18 @@ class WatermarkApp:
         self.parallel_videos_cb.configure(values=[auto_label, "1", "2", "3", "4"])
         if str(self.parallel_videos_var.get()).startswith("Auto"):
             self.parallel_videos_var.set(auto_label)
+
+    def update_advanced_visibility(self):
+        if not hasattr(self, "frame_advanced_group"):
+            return
+        if self.show_advanced_var.get():
+            self.frame_advanced_group.pack(fill="x", pady=(0, 10))
+            if hasattr(self, "btn_toggle_advanced"):
+                self.btn_toggle_advanced.config(text="Hide Advanced Settings")
+        else:
+            self.frame_advanced_group.pack_forget()
+            if hasattr(self, "btn_toggle_advanced"):
+                self.btn_toggle_advanced.config(text="Show Advanced Settings")
 
     def should_use_nvenc(self, exe, encoder_pref):
         nvenc_supported = self.has_ffmpeg_encoder(exe, "h264_nvenc")
@@ -284,19 +365,43 @@ class WatermarkApp:
         style = ttk.Style(self.root)
         if 'clam' in style.theme_names():
             style.theme_use('clam')
-            
-        self.main_container = tk.Frame(self.root, padx=10, pady=10)
+
+        bg_app = "#f4f6f8"
+        bg_panel = "#eef3f8"
+        bg_video = "#eef6ff"
+        bg_watermark = "#eef8f0"
+        bg_export = "#fff4e8"
+        bg_advanced = "#f3f1f8"
+        accent_export = "#d97706"
+        text_muted = "#5f6b76"
+
+        self.root.configure(bg=bg_app)
+        style.configure("App.TFrame", background=bg_app)
+        style.configure("Sidebar.TFrame", background=bg_panel)
+        style.configure("SectionBlue.TLabelframe", background=bg_video, borderwidth=1, relief="solid")
+        style.configure("SectionBlue.TLabelframe.Label", background=bg_video, foreground="#1d4ed8", font=("Arial", 10, "bold"))
+        style.configure("SectionGreen.TLabelframe", background=bg_watermark, borderwidth=1, relief="solid")
+        style.configure("SectionGreen.TLabelframe.Label", background=bg_watermark, foreground="#15803d", font=("Arial", 10, "bold"))
+        style.configure("SectionOrange.TLabelframe", background=bg_export, borderwidth=1, relief="solid")
+        style.configure("SectionOrange.TLabelframe.Label", background=bg_export, foreground=accent_export, font=("Arial", 10, "bold"))
+        style.configure("SectionGray.TLabelframe", background=bg_advanced, borderwidth=1, relief="solid")
+        style.configure("SectionGray.TLabelframe.Label", background=bg_advanced, foreground="#5b6472", font=("Arial", 10, "bold"))
+        style.configure("Start.TButton", font=("Arial", 10, "bold"), padding=8)
+        style.map("Start.TButton", background=[("!disabled", "#f59e0b"), ("active", "#d97706")], foreground=[("!disabled", "white")])
+        style.configure("Accent.Horizontal.TProgressbar", troughcolor="#dde5ec", background="#2563eb", bordercolor="#dde5ec", lightcolor="#2563eb", darkcolor="#2563eb")
+             
+        self.main_container = tk.Frame(self.root, padx=10, pady=10, bg=bg_app)
         self.main_container.pack(fill="both", expand=True)
 
         # ---------------- SIDEBAR (Left Column) with Scrollbar ---------------- #
-        self.sidebar_outer = tk.Frame(self.main_container, width=420)
+        self.sidebar_outer = tk.Frame(self.main_container, width=420, bg=bg_app)
         self.sidebar_outer.pack(side="left", fill="y", padx=(0, 10))
         self.sidebar_outer.pack_propagate(False)
 
-        self.sidebar_canvas = tk.Canvas(self.sidebar_outer, borderwidth=0, highlightthickness=0)
+        self.sidebar_canvas = tk.Canvas(self.sidebar_outer, borderwidth=0, highlightthickness=0, bg=bg_panel)
         self.sidebar_scrollbar = ttk.Scrollbar(self.sidebar_outer, orient="vertical", command=self.sidebar_canvas.yview)
         # Increase width slightly to account for scrollbar visibility and padding
-        self.sidebar_frame = tk.Frame(self.sidebar_canvas)
+        self.sidebar_frame = ttk.Frame(self.sidebar_canvas, style="Sidebar.TFrame")
 
         self.sidebar_frame.bind("<Configure>", lambda e: self.sidebar_canvas.configure(scrollregion=self.sidebar_canvas.bbox("all")))
         self.sidebar_canvas.create_window((0, 0), window=self.sidebar_frame, anchor="nw", width=390)
@@ -309,9 +414,10 @@ class WatermarkApp:
         def _on_mousewheel(event): self.sidebar_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
         self.sidebar_canvas.bind_all("<MouseWheel>", _on_mousewheel)
 
-        # 1. VIDEO SETTINGS BLOCK
-        frame_video_group = tk.LabelFrame(self.sidebar_frame, text="VIDEO SETTINGS", padx=10, pady=10, fg="blue", font=("Arial", 10, "bold"))
+        # 1. VIDEOS
+        frame_video_group = ttk.LabelFrame(self.sidebar_frame, text="1. Videos", padding=10, style="SectionBlue.TLabelframe")
         frame_video_group.pack(fill="x", pady=(0, 10))
+        tk.Label(frame_video_group, text="Add the clips you want to export.", fg=text_muted, bg=bg_video, anchor="w", font=("Arial", 8)).pack(fill="x", pady=(0, 4))
 
         # List & Add/Remove
         frame_list = tk.Frame(frame_video_group)
@@ -331,36 +437,39 @@ class WatermarkApp:
         ttk.Button(btn_list, text="Add Videos", command=self.add_videos).pack(side="left", fill="x", expand=True, padx=(0, 2))
         ttk.Button(btn_list, text="Remove", command=self.remove_videos).pack(side="left", fill="x", expand=True, padx=(2, 0))
 
-        # Global Config (Format, Quality, Speed)
-        frame_v_cfg = tk.Frame(frame_video_group)
-        frame_v_cfg.pack(fill="x", pady=5)
+        frame_export_group = ttk.LabelFrame(self.sidebar_frame, text="3. Export", padding=10, style="SectionOrange.TLabelframe")
+        frame_advanced_group = ttk.LabelFrame(self.sidebar_frame, text="4. Advanced", padding=10, style="SectionGray.TLabelframe")
+        self.frame_advanced_group = frame_advanced_group
+
+        # Advanced export config
+        frame_v_cfg = tk.Frame(frame_advanced_group)
         frame_v_cfg.columnconfigure(1, weight=1)
         
-        ttk.Label(frame_v_cfg, text="Format:").grid(row=0, column=0, sticky="w", pady=2)
-        self.format_var = tk.StringVar(value="Original")
-        ttk.Combobox(frame_v_cfg, textvariable=self.format_var, values=["Original", "MP4", "MKV", "AVI", "MOV"], state="readonly").grid(row=0, column=1, sticky="ew", padx=10)
-        
-        ttk.Label(frame_v_cfg, text="Quality:").grid(row=1, column=0, sticky="w", pady=2)
-        self.quality_var = tk.StringVar(value="Medium (Balanced)")
-        ttk.Combobox(frame_v_cfg, textvariable=self.quality_var, values=["High (Lossless)", "Medium (Balanced)", "Low (Smaller File)"], state="readonly").grid(row=1, column=1, sticky="ew", padx=10)
-
-        ttk.Label(frame_v_cfg, text="Timelapse:").grid(row=2, column=0, sticky="w", pady=2)
+        ttk.Label(frame_v_cfg, text="Playback Speed:").grid(row=0, column=0, sticky="w", pady=2)
         self.speed_var = tk.StringVar(value="1x (Normal)")
-        ttk.Combobox(frame_v_cfg, textvariable=self.speed_var, values=["1x (Normal)", "2x", "4x", "8x", "16x", "0.5x (Slow)"], state="readonly").grid(row=2, column=1, sticky="ew", padx=10)
+        ttk.Combobox(frame_v_cfg, textvariable=self.speed_var, values=["1x (Normal)", "2x", "4x", "8x", "16x", "0.5x (Slow)"], state="readonly").grid(row=0, column=1, sticky="ew", padx=10)
 
-        ttk.Label(frame_v_cfg, text="Fade:").grid(row=3, column=0, sticky="w", pady=2)
-        ttk.Combobox(frame_v_cfg, textvariable=self.v_fade_var, values=["None", "Fade In", "Fade Out", "Both"], state="readonly").grid(row=3, column=1, sticky="ew", padx=10)
+        ttk.Label(frame_v_cfg, text="Video Fade:").grid(row=1, column=0, sticky="w", pady=2)
+        ttk.Combobox(frame_v_cfg, textvariable=self.v_fade_var, values=["None", "Fade In", "Fade Out", "Both"], state="readonly").grid(row=1, column=1, sticky="ew", padx=10)
 
-        ttk.Label(frame_v_cfg, text="Encoder:").grid(row=4, column=0, sticky="w", pady=2)
+        ttk.Label(frame_v_cfg, text="Processing Mode:").grid(row=2, column=0, sticky="w", pady=2)
         self.encoder_cb = ttk.Combobox(frame_v_cfg, textvariable=self.encoder_var, values=["Auto (Recommended)", "CPU Only (More compatible)", "NVIDIA GPU (Fastest, if supported)"], state="readonly")
-        self.encoder_cb.grid(row=4, column=1, sticky="ew", padx=10)
+        self.encoder_cb.grid(row=2, column=1, sticky="ew", padx=10)
         self.encoder_cb.bind("<<ComboboxSelected>>", self.refresh_parallel_videos_ui)
 
-        ttk.Label(frame_v_cfg, text="Encode Speed:").grid(row=5, column=0, sticky="w", pady=2)
-        ttk.Combobox(frame_v_cfg, textvariable=self.encode_speed_var, values=["Fast (better quality)", "Very Fast (Recommended)", "Super Fast (faster, larger file)", "Ultra Fast (fastest, lower quality)"], state="readonly").grid(row=5, column=1, sticky="ew", padx=10)
+        ttk.Label(frame_v_cfg, text="Processing Speed:").grid(row=3, column=0, sticky="w", pady=2)
+        ttk.Combobox(frame_v_cfg, textvariable=self.encode_speed_var, values=["Fast (better quality)", "Very Fast (Recommended)", "Super Fast (faster, larger file)", "Ultra Fast (fastest, lower quality)"], state="readonly").grid(row=3, column=1, sticky="ew", padx=10)
 
-        frame_out = tk.Frame(frame_video_group, pady=5)
-        frame_out.pack(fill="x")
+        frame_export_cfg = tk.Frame(frame_export_group, pady=2)
+        frame_export_cfg.columnconfigure(1, weight=1)
+        ttk.Label(frame_export_cfg, text="Format:").grid(row=0, column=0, sticky="w", pady=2)
+        self.format_var = tk.StringVar(value="Original")
+        ttk.Combobox(frame_export_cfg, textvariable=self.format_var, values=["Original", "MP4", "MKV", "AVI", "MOV"], state="readonly").grid(row=0, column=1, sticky="ew", padx=10)
+        ttk.Label(frame_export_cfg, text="Quality:").grid(row=1, column=0, sticky="w", pady=2)
+        self.quality_var = tk.StringVar(value="Medium (Balanced)")
+        ttk.Combobox(frame_export_cfg, textvariable=self.quality_var, values=["High (Lossless)", "Medium (Balanced)", "Low (Smaller File)"], state="readonly").grid(row=1, column=1, sticky="ew", padx=10)
+
+        frame_out = tk.Frame(frame_export_group, pady=5)
         self.lbl_output = tk.Label(frame_out, text="Output: Not Set", fg="gray", anchor="w", font=("Arial", 8), wraplength=300)
         self.lbl_output.pack(fill="x")
         out_btns = tk.Frame(frame_out)
@@ -368,9 +477,10 @@ class WatermarkApp:
         ttk.Button(out_btns, text="Set Folder", command=self.select_output_dir).pack(side="left", fill="x", expand=True)
         ttk.Button(out_btns, text="Open Folder", command=self.open_output_dir).pack(side="left", padx=2)
 
-        # 2. WATERMARK SETTINGS BLOCK
-        frame_wm_group = tk.LabelFrame(self.sidebar_frame, text="WATERMARK SETTINGS", padx=10, pady=10, fg="darkgreen", font=("Arial", 10, "bold"))
+        # 2. WATERMARK
+        frame_wm_group = ttk.LabelFrame(self.sidebar_frame, text="2. Watermark", padding=10, style="SectionGreen.TLabelframe")
         frame_wm_group.pack(fill="x", pady=(0, 10))
+        tk.Label(frame_wm_group, text="Choose an image or text mark, then adjust its size and position.", fg=text_muted, bg=bg_watermark, anchor="w", font=("Arial", 8)).pack(fill="x", pady=(0, 4))
 
         # Preview Logo
         wm_info2 = tk.Frame(frame_wm_group)
@@ -449,35 +559,34 @@ class WatermarkApp:
         frame_wm_det.pack(fill="x", pady=5)
         frame_wm_det.columnconfigure(1, weight=1)
         
-        ttk.Label(frame_wm_det, text="Pos:").grid(row=0, column=0, sticky="w")
+        ttk.Label(frame_wm_det, text="Position:").grid(row=0, column=0, sticky="w")
         self.position_var = tk.StringVar(value="Bottom Right")
         dp = ttk.Combobox(frame_wm_det, textvariable=self.position_var, values=["Top Left", "Top Right", "Bottom Left", "Bottom Right", "Center", "Custom (Drag)"], state="readonly")
         dp.grid(row=0, column=1, sticky="ew", padx=10, pady=2)
         dp.bind("<<ComboboxSelected>>", self.on_position_changed)
         
-        ttk.Label(frame_wm_det, text="Scale:").grid(row=1, column=0, sticky="w")
+        ttk.Label(frame_wm_det, text="Size:").grid(row=1, column=0, sticky="w")
         self.scale_var = tk.DoubleVar(value=100)
         ttk.Scale(frame_wm_det, from_=10, to=300, orient="horizontal", variable=self.scale_var, command=self.on_transform_changed).grid(row=1, column=1, sticky="ew", padx=10, pady=2)
 
-        ttk.Label(frame_wm_det, text="Opacity:").grid(row=2, column=0, sticky="w")
+        ttk.Label(frame_wm_det, text="Transparency:").grid(row=2, column=0, sticky="w")
         self.opacity_var = tk.DoubleVar(value=100)
         ttk.Scale(frame_wm_det, from_=0, to=100, orient="horizontal", variable=self.opacity_var, command=self.on_transform_changed).grid(row=2, column=1, sticky="ew", padx=10, pady=2)
         
-        ttk.Label(frame_wm_det, text="Rotate:").grid(row=3, column=0, sticky="w")
+        ttk.Label(frame_wm_det, text="Rotation:").grid(row=3, column=0, sticky="w")
         ttk.Scale(frame_wm_det, from_=0, to=360, orient="horizontal", variable=self.rotate_var, command=self.on_transform_changed).grid(row=3, column=1, sticky="ew", padx=10, pady=2)
 
-        ttk.Label(frame_wm_det, text="Start(s):").grid(row=4, column=0, sticky="w")
+        ttk.Label(frame_wm_det, text="Show From (s):").grid(row=4, column=0, sticky="w")
         tk.Entry(frame_wm_det, textvariable=self.wm_start_time_var, validate='key', validatecommand=self._vcmd).grid(row=4, column=1, sticky="ew", padx=10, pady=2)
 
-        ttk.Label(frame_wm_det, text="End(s):").grid(row=5, column=0, sticky="w")
+        ttk.Label(frame_wm_det, text="Show Until (s):").grid(row=5, column=0, sticky="w")
         tk.Entry(frame_wm_det, textvariable=self.wm_end_time_var, validate='key', validatecommand=self._vcmd).grid(row=5, column=1, sticky="ew", padx=10, pady=2)
 
         ttk.Label(frame_wm_det, text="Effect:").grid(row=6, column=0, sticky="w")
         ttk.Combobox(frame_wm_det, textvariable=self.wm_effect_var, values=["None", "Fade", "Fly In (L)", "Fly In (R)"], state="readonly").grid(row=6, column=1, sticky="ew", padx=10, pady=2)
 
-        # 3. AUDIO (Inside or below)
-        frame_audio = tk.Frame(frame_wm_group, pady=5)
-        frame_audio.pack(fill="x")
+        # Advanced audio controls
+        frame_audio = tk.Frame(frame_advanced_group, pady=5)
         ttk.Separator(frame_audio, orient='horizontal').pack(fill='x', pady=5)
         self.lbl_bgm = tk.Label(frame_audio, text="Audio: Original", fg="gray", font=("Arial", 8))
         self.lbl_bgm.pack(fill="x")
@@ -491,40 +600,55 @@ class WatermarkApp:
         
         v_box = tk.Frame(frame_audio, pady=5)
         v_box.pack(fill="x")
-        ttk.Label(v_box, text="Orig Vol:", width=8).grid(row=0, column=0, sticky="w")
+        ttk.Label(v_box, text="Original Vol:", width=12).grid(row=0, column=0, sticky="w")
         ttk.Scale(v_box, from_=0, to=200, orient="horizontal", variable=self.orig_vol_var).grid(row=0, column=1, sticky="ew", padx=5)
         
-        ttk.Label(v_box, text="BGM Vol:", width=8).grid(row=1, column=0, sticky="w")
+        ttk.Label(v_box, text="Music Vol:", width=12).grid(row=1, column=0, sticky="w")
         ttk.Scale(v_box, from_=0, to=200, orient="horizontal", variable=self.bgm_vol_var).grid(row=1, column=1, sticky="ew", padx=5)
         v_box.columnconfigure(1, weight=1)
 
         tk.Checkbutton(frame_audio, text="Mute Original", variable=self.mute_var).pack(anchor="w")
 
-        # Action block
-        frame_actions = tk.Frame(self.sidebar_frame, pady=5)
-        frame_actions.pack(side="bottom", fill="x")
-        self.lbl_status = tk.Label(frame_actions, text="Ready", fg="blue", anchor="w")
+        # Export block
+        frame_actions = tk.Frame(frame_export_group, pady=5)
+        self.lbl_status = tk.Label(frame_actions, text="Ready to export", fg="blue", anchor="w")
         self.lbl_status.pack(fill="x")
         self.progress_var = tk.DoubleVar()
-        self.progress_bar = ttk.Progressbar(frame_actions, variable=self.progress_var, maximum=100)
+        self.progress_bar = ttk.Progressbar(frame_actions, variable=self.progress_var, maximum=100, style="Accent.Horizontal.TProgressbar")
         self.progress_bar.pack(fill="x", pady=5)
         
-        tk.Checkbutton(frame_actions, text="Process Selected Only", variable=self.process_selected_var).pack(anchor="w")
-        parallel_box = tk.Frame(frame_actions)
+        tk.Checkbutton(frame_actions, text="Only export selected videos", variable=self.process_selected_var).pack(anchor="w")
+        self.btn_toggle_advanced = ttk.Button(frame_actions, text="Show Advanced Settings", command=lambda: (self.show_advanced_var.set(not self.show_advanced_var.get()), self.update_advanced_visibility()))
+        self.btn_toggle_advanced.pack(fill="x", pady=(4, 5))
+        parallel_box = tk.Frame(frame_advanced_group)
         parallel_box.pack(fill="x", pady=(0, 5))
-        ttk.Label(parallel_box, text="Parallel Videos:").pack(side="left")
+        ttk.Label(parallel_box, text="Videos at Once:").pack(side="left")
         self.parallel_videos_cb = ttk.Combobox(parallel_box, textvariable=self.parallel_videos_var, values=[self.get_auto_parallel_label_for_cfg({"exe": imageio_ffmpeg.get_ffmpeg_exe(), "encoder": self.encoder_var.get()}), "1", "2", "3", "4"], state="readonly", width=16)
         self.parallel_videos_cb.pack(side="right")
         self.parallel_videos_var.set(self.get_auto_parallel_label_for_cfg({"exe": imageio_ffmpeg.get_ffmpeg_exe(), "encoder": self.encoder_var.get()}))
 
-        self.btn_start = ttk.Button(frame_actions, text="🚀 START PROCESS", command=self.start_processing)
+        self.btn_start = ttk.Button(frame_actions, text="🚀 START PROCESS", command=self.start_processing, style="Start.TButton")
         self.btn_start.pack(fill="x", ipady=10)
+        self.btn_start.config(text="Start Export")
+        tk.Label(frame_actions, text="Recommended settings are already selected for most users.", fg=text_muted, bg=bg_export, anchor="w", font=("Arial", 8)).pack(fill="x", pady=(4, 0))
         
         ttk.Button(frame_actions, text="Reset All Settings", command=self.reset_settings).pack(fill="x", pady=(5,0))
 
+        frame_export_group.pack(fill="x", pady=(0, 10))
+        tk.Label(frame_export_group, text="Choose where the finished videos will be saved, then start the export.", fg=text_muted, bg=bg_export, anchor="w", font=("Arial", 8)).pack(fill="x", pady=(0, 4))
+        frame_export_cfg.pack(fill="x", pady=(0, 6))
+        frame_out.pack(fill="x")
+        frame_actions.pack(fill="x")
+
+        tk.Label(frame_advanced_group, text="Optional settings for speed, effects, audio, and advanced processing.", fg=text_muted, bg=bg_advanced, anchor="w", font=("Arial", 8)).pack(fill="x", pady=(0, 4))
+        frame_v_cfg.pack(fill="x", pady=(0, 6))
+        frame_audio.pack(fill="x")
+        self.update_advanced_visibility()
+
         # ---------------- PLAYER PREVIEW (Right) ---------------- #
-        frame_preview = tk.LabelFrame(self.main_container, text="Video Preview (Drag logo to position)", padx=5, pady=5)
+        frame_preview = ttk.LabelFrame(self.main_container, text="Preview", padding=5, style="SectionGray.TLabelframe")
         frame_preview.pack(side="right", fill="both", expand=True)
+        tk.Label(frame_preview, text="Drag the watermark in the preview to reposition it. Audio preview opens a short sample.", fg=text_muted, bg=bg_advanced, anchor="w", font=("Arial", 8)).pack(fill="x", pady=(0, 4))
         
         self.canvas_preview = tk.Canvas(frame_preview, bg="black", highlightthickness=0, borderwidth=0)
         self.canvas_preview.pack(fill="both", expand=True, pady=(0, 5))
@@ -763,7 +887,12 @@ class WatermarkApp:
 
     def on_wm_tab_changed(self, e): pass
     def clear_watermark_selection(self):
-        self.watermark_file = ""; self.lbl_watermark.config(text="No image", fg="gray"); self.wm_preview_img=None; self.lbl_wm_preview.config(image='', text="None"); self.refresh_preview()
+        self.watermark_file = ""
+        self.generated_text_watermark_file = ""
+        self.lbl_watermark.config(text="No image", fg="gray")
+        self.wm_preview_img=None
+        self.lbl_wm_preview.config(image='', text="None")
+        self.refresh_preview()
 
     def select_bgm(self):
         f = filedialog.askopenfilename(title="Music", filetypes=(("Audio","*.mp3 *.wav *.m4a *.aac"),("All","*.*")))
@@ -812,12 +941,18 @@ class WatermarkApp:
             if os.name=='nt': os.startfile(out)
             else: subprocess.run(["open" if sys.platform=="darwin" else "xdg-open", out])
         except Exception as e: self.root.after(0, lambda: messagebox.showerror("Error", str(e)))
-        finally: self.root.after(0, lambda: (self.btn_audio_preview.config(state="normal"), self.lbl_status.config(text="Ready", fg="blue")))
+        finally: self.root.after(0, lambda: (self.btn_audio_preview.config(state="normal"), self.lbl_status.config(text="Ready to export", fg="blue")))
 
     def on_position_changed(self, e=None): self.refresh_preview()
     def on_transform_changed(self, e=None): self.refresh_preview()
     def refresh_preview(self): 
-        if self.video_cap and self.preview_bg_img: self.draw_preview_canvas(self.watermark_file, self.position_var.get(), self.orig_v_width)
+        selected = self.listbox_videos.curselection()
+        if not selected:
+            return
+        if not self.video_cap or not self.video_cap.isOpened() or not self.preview_bg_img:
+            self.show_preview(None)
+            return
+        self.draw_preview_canvas(self.watermark_file, self.position_var.get(), self.orig_v_width)
 
     def open_output_dir(self):
         if self.output_dir: os.startfile(self.output_dir) if os.name=='nt' else subprocess.call(['xdg-open', self.output_dir])
@@ -954,8 +1089,14 @@ class WatermarkApp:
         except: w, h = dr.textsize(txt, font=font)
         img = Image.new("RGBA", (w+20, h+20), (255,255,255,0))
         ImageDraw.Draw(img).text((10,10), txt, fill=self.text_color_var.get(), font=font)
-        p = os.path.join(tempfile.gettempdir(), "watermark_app_temp_text.png")
+        if self.generated_text_watermark_file and os.path.exists(self.generated_text_watermark_file):
+            try:
+                os.remove(self.generated_text_watermark_file)
+            except:
+                pass
+        p = os.path.join(tempfile.gettempdir(), f"watermark_app_temp_text_{uuid.uuid4().hex}.png")
         img.save(p)
+        self.generated_text_watermark_file = p
         self.watermark_file=p
         self.lbl_watermark.config(text=f"Text: {txt[:15]}...", fg="black")
         self.update_wm_preview()
@@ -1154,6 +1295,7 @@ class WatermarkApp:
 
         def finish():
             self.btn_start.config(state="normal")
+            self.refresh_preview()
             if failed:
                 self.lbl_status.config(text=f"Completed with errors ({total-len(failed)}/{total})", fg="red")
                 err_list = "\n\n".join(f"{name}\n{err}" for name, err in failed)
@@ -1246,7 +1388,7 @@ class WatermarkApp:
         self.font_var.set("Arial")
         self.mute_var.set(False)
         self.refresh_parallel_videos_ui()
-        self.lbl_status.config(text="Ready", fg="blue")
+        self.lbl_status.config(text="Ready to export", fg="blue")
         self.progress_var.set(0)
         if self.video_cap: self.video_cap.release(); self.video_cap = None
         self.clear_preview("Select a video\nto preview")
