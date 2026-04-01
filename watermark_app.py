@@ -6,6 +6,7 @@ import os
 import time
 import sys
 import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import imageio_ffmpeg
 import cv2
 from PIL import Image, ImageTk, ImageDraw, ImageFont
@@ -59,6 +60,7 @@ class WatermarkApp:
         self.rotate_var = tk.DoubleVar(value=0)
         self.preview_bg_img = None
         self.process_selected_var = tk.BooleanVar(value=False)
+        self.parallel_videos_var = tk.StringVar()
         
         self.config_path = os.path.join(os.path.dirname(__file__), "config.json")
         self.history_wm = []
@@ -79,6 +81,15 @@ class WatermarkApp:
             return True
         except ValueError:
             return False
+
+    def get_auto_parallel_count(self):
+        cpu_count = os.cpu_count() or 2
+        return max(1, min(4, cpu_count // 2))
+
+    def get_auto_parallel_label(self):
+        count = self.get_auto_parallel_count()
+        suffix = "video" if count == 1 else "videos"
+        return f"Auto ({count} {suffix})"
 
     def setup_ui(self):
         style = ttk.Style(self.root)
@@ -134,21 +145,22 @@ class WatermarkApp:
         # Global Config (Format, Quality, Speed)
         frame_v_cfg = tk.Frame(frame_video_group)
         frame_v_cfg.pack(fill="x", pady=5)
+        frame_v_cfg.columnconfigure(1, weight=1)
         
         ttk.Label(frame_v_cfg, text="Format:").grid(row=0, column=0, sticky="w", pady=2)
         self.format_var = tk.StringVar(value="Original")
-        ttk.Combobox(frame_v_cfg, textvariable=self.format_var, values=["Original", "MP4", "MKV", "AVI", "MOV"], state="readonly", width=12).grid(row=0, column=1, sticky="ew", padx=10)
+        ttk.Combobox(frame_v_cfg, textvariable=self.format_var, values=["Original", "MP4", "MKV", "AVI", "MOV"], state="readonly").grid(row=0, column=1, sticky="ew", padx=10)
         
         ttk.Label(frame_v_cfg, text="Quality:").grid(row=1, column=0, sticky="w", pady=2)
         self.quality_var = tk.StringVar(value="Medium (Balanced)")
-        ttk.Combobox(frame_v_cfg, textvariable=self.quality_var, values=["High (Lossless)", "Medium (Balanced)", "Low (Smaller File)"], state="readonly", width=12).grid(row=1, column=1, sticky="ew", padx=10)
+        ttk.Combobox(frame_v_cfg, textvariable=self.quality_var, values=["High (Lossless)", "Medium (Balanced)", "Low (Smaller File)"], state="readonly").grid(row=1, column=1, sticky="ew", padx=10)
 
         ttk.Label(frame_v_cfg, text="Timelapse:").grid(row=2, column=0, sticky="w", pady=2)
         self.speed_var = tk.StringVar(value="1x (Normal)")
-        ttk.Combobox(frame_v_cfg, textvariable=self.speed_var, values=["1x (Normal)", "2x", "4x", "8x", "16x", "0.5x (Slow)"], state="readonly", width=12).grid(row=2, column=1, sticky="ew", padx=10)
+        ttk.Combobox(frame_v_cfg, textvariable=self.speed_var, values=["1x (Normal)", "2x", "4x", "8x", "16x", "0.5x (Slow)"], state="readonly").grid(row=2, column=1, sticky="ew", padx=10)
 
         ttk.Label(frame_v_cfg, text="Fade:").grid(row=3, column=0, sticky="w", pady=2)
-        ttk.Combobox(frame_v_cfg, textvariable=self.v_fade_var, values=["None", "Fade In", "Fade Out", "Both"], state="readonly", width=12).grid(row=3, column=1, sticky="ew", padx=10)
+        ttk.Combobox(frame_v_cfg, textvariable=self.v_fade_var, values=["None", "Fade In", "Fade Out", "Both"], state="readonly").grid(row=3, column=1, sticky="ew", padx=10)
 
         frame_out = tk.Frame(frame_video_group, pady=5)
         frame_out.pack(fill="x")
@@ -191,9 +203,10 @@ class WatermarkApp:
         self.wm_notebook.add(self.tab_text, text="Text")
         t_box = tk.Frame(self.tab_text, pady=5)
         t_box.pack(fill="x")
+        t_box.columnconfigure(1, weight=1)
         ttk.Label(t_box, text="Text:").grid(row=0, column=0, padx=2)
         self.text_var = tk.StringVar(value="Sample")
-        ttk.Entry(t_box, textvariable=self.text_var, width=12).grid(row=0, column=1, sticky="ew")
+        ttk.Entry(t_box, textvariable=self.text_var).grid(row=0, column=1, sticky="ew")
         
         c_box = tk.Frame(self.tab_text)
         c_box.pack(fill="x", padx=5)
@@ -237,10 +250,11 @@ class WatermarkApp:
         # Detailed Params
         frame_wm_det = tk.Frame(frame_wm_group)
         frame_wm_det.pack(fill="x", pady=5)
+        frame_wm_det.columnconfigure(1, weight=1)
         
         ttk.Label(frame_wm_det, text="Pos:").grid(row=0, column=0, sticky="w")
         self.position_var = tk.StringVar(value="Bottom Right")
-        dp = ttk.Combobox(frame_wm_det, textvariable=self.position_var, values=["Top Left", "Top Right", "Bottom Left", "Bottom Right", "Center", "Custom (Drag)"], state="readonly", width=12)
+        dp = ttk.Combobox(frame_wm_det, textvariable=self.position_var, values=["Top Left", "Top Right", "Bottom Left", "Bottom Right", "Center", "Custom (Drag)"], state="readonly")
         dp.grid(row=0, column=1, sticky="ew", padx=10, pady=2)
         dp.bind("<<ComboboxSelected>>", self.on_position_changed)
         
@@ -256,13 +270,13 @@ class WatermarkApp:
         ttk.Scale(frame_wm_det, from_=0, to=360, orient="horizontal", variable=self.rotate_var, command=self.on_transform_changed).grid(row=3, column=1, sticky="ew", padx=10, pady=2)
 
         ttk.Label(frame_wm_det, text="Start(s):").grid(row=4, column=0, sticky="w")
-        tk.Entry(frame_wm_det, textvariable=self.wm_start_time_var, width=12, validate='key', validatecommand=self._vcmd).grid(row=4, column=1, sticky="ew", padx=10, pady=2)
+        tk.Entry(frame_wm_det, textvariable=self.wm_start_time_var, validate='key', validatecommand=self._vcmd).grid(row=4, column=1, sticky="ew", padx=10, pady=2)
 
         ttk.Label(frame_wm_det, text="End(s):").grid(row=5, column=0, sticky="w")
-        tk.Entry(frame_wm_det, textvariable=self.wm_end_time_var, width=12, validate='key', validatecommand=self._vcmd).grid(row=5, column=1, sticky="ew", padx=10, pady=2)
+        tk.Entry(frame_wm_det, textvariable=self.wm_end_time_var, validate='key', validatecommand=self._vcmd).grid(row=5, column=1, sticky="ew", padx=10, pady=2)
 
         ttk.Label(frame_wm_det, text="Effect:").grid(row=6, column=0, sticky="w")
-        ttk.Combobox(frame_wm_det, textvariable=self.wm_effect_var, values=["None", "Fade", "Fly In (L)", "Fly In (R)"], state="readonly", width=12).grid(row=6, column=1, sticky="ew", padx=10, pady=2)
+        ttk.Combobox(frame_wm_det, textvariable=self.wm_effect_var, values=["None", "Fade", "Fly In (L)", "Fly In (R)"], state="readonly").grid(row=6, column=1, sticky="ew", padx=10, pady=2)
 
         # 3. AUDIO (Inside or below)
         frame_audio = tk.Frame(frame_wm_group, pady=5)
@@ -299,7 +313,13 @@ class WatermarkApp:
         self.progress_bar.pack(fill="x", pady=5)
         
         tk.Checkbutton(frame_actions, text="Process Selected Only", variable=self.process_selected_var).pack(anchor="w")
-        
+        parallel_box = tk.Frame(frame_actions)
+        parallel_box.pack(fill="x", pady=(0, 5))
+        ttk.Label(parallel_box, text="Parallel Videos:").pack(side="left")
+        self.parallel_videos_cb = ttk.Combobox(parallel_box, textvariable=self.parallel_videos_var, values=[self.get_auto_parallel_label(), "1", "2", "3", "4"], state="readonly", width=16)
+        self.parallel_videos_cb.pack(side="right")
+        self.parallel_videos_var.set(self.get_auto_parallel_label())
+
         self.btn_start = ttk.Button(frame_actions, text="🚀 START PROCESS", command=self.start_processing)
         self.btn_start.pack(fill="x", ipady=10)
         
@@ -344,20 +364,13 @@ class WatermarkApp:
             if not cap.isOpened():
                 invalid.append(f"{os.path.basename(f)} (Readable error)")
                 continue
-                
-            w = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
-            h = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
             cap.release()
-            
-            if h <= 0 or abs((w/h) - (9.0/16.0)) > 0.02:
-                invalid.append(os.path.basename(f))
-                continue
 
             self.video_files.append(f)
             self.listbox_videos.insert(tk.END, os.path.basename(f))
             
         if invalid:
-            msg = "Only 9:16 (vertical) videos are accepted. These files were rejected:\n\n" + "\n".join(invalid)
+            msg = "Some files could not be opened and were rejected:\n\n" + "\n".join(invalid)
             messagebox.showwarning("Invalid Format", msg)
 
         if is_first and len(self.video_files) > 0:
@@ -610,35 +623,55 @@ class WatermarkApp:
     def open_output_dir(self):
         if self.output_dir: os.startfile(self.output_dir) if os.name=='nt' else subprocess.call(['xdg-open', self.output_dir])
 
-    def get_ffmpeg_complex_filter_str(self, vid_dur=0, has_audio=True):
-        p, pad = self.position_var.get(), 10
-        target_x = {"Top Left": f"{pad}", "Top Right": f"W-w-{pad}", "Bottom Left": f"{pad}", "Bottom Right": f"W-w-{pad}", "Center": "(W-w)/2"}.get(p, f"W*{self.custom_x_ratio:.6f}")
-        target_y = {"Top Left": f"{pad}", "Top Right": f"{pad}", "Bottom Left": f"H-h-{pad}", "Bottom Right": f"H-h-{pad}", "Center": "(H-h)/2"}.get(p, f"H*{self.custom_y_ratio:.6f}")
+    def get_ffmpeg_complex_filter_str(self, vid_dur=0, has_audio=True, cfg=None):
+        if cfg is None:
+            cfg = {
+                "position": self.position_var.get(),
+                "custom_x_ratio": self.custom_x_ratio,
+                "custom_y_ratio": self.custom_y_ratio,
+                "scale": self.scale_var.get(),
+                "rotate": self.rotate_var.get(),
+                "wm_start_time": self.wm_start_time_var.get(),
+                "wm_end_time": self.wm_end_time_var.get(),
+                "wm_effect": self.wm_effect_var.get(),
+                "opacity": self.opacity_var.get(),
+                "spd": float(self.speed_var.get().split('x')[0]),
+                "v_fade": self.v_fade_var.get(),
+                "orig_vol": self.orig_vol_var.get(),
+                "bgm_vol": self.bgm_vol_var.get(),
+                "watermark_file": self.watermark_file,
+                "bgm_file": self.bgm_file,
+                "mute": self.mute_var.get()
+            }
+
+        p, pad = cfg["position"], 10
+        target_x = {"Top Left": f"{pad}", "Top Right": f"W-w-{pad}", "Bottom Left": f"{pad}", "Bottom Right": f"W-w-{pad}", "Center": "(W-w)/2"}.get(p, f"W*{cfg['custom_x_ratio']:.6f}")
+        target_y = {"Top Left": f"{pad}", "Top Right": f"{pad}", "Bottom Left": f"H-h-{pad}", "Bottom Right": f"H-h-{pad}", "Center": "(H-h)/2"}.get(p, f"H*{cfg['custom_y_ratio']:.6f}")
         
         flt = ["format=rgba"]
-        usc = self.scale_var.get()/100.0
+        usc = cfg["scale"]/100.0
         if usc != 1.0: 
             # Force even dimensions for hardware compatibility (iPhone/Android)
             flt.append(f"scale=trunc(iw*{usc}/2)*2:trunc(ih*{usc}/2)*2")
         
-        rot = self.rotate_var.get()
+        rot = cfg["rotate"]
         if rot != 0:
             rad = f"({rot}*PI/180)"
             flt.append(f"rotate={rad}:c=none:ow='iw*abs(cos({rad}))+ih*abs(sin({rad}))':oh='iw*abs(sin({rad}))+ih*abs(cos({rad}))'")
 
         st, ed = 0, 999999
         try:
-            st = float(self.wm_start_time_var.get() or 0)
-            ed_val = self.wm_end_time_var.get().strip()
+            st = float(cfg["wm_start_time"] or 0)
+            ed_val = cfg["wm_end_time"].strip()
             if ed_val: ed = float(ed_val)
         except: pass
 
-        wm_eff = self.wm_effect_var.get()
+        wm_eff = cfg["wm_effect"]
         if wm_eff == "Fade":
             flt.append(f"fade=t=in:st={st}:d=0.5:alpha=1")
             if ed < 999998: flt.append(f"fade=t=out:st={ed-0.5}:d=0.5:alpha=1")
         
-        opa = self.opacity_var.get()/100.0
+        opa = cfg["opacity"]/100.0
         if opa < 1.0: flt.append(f"colorchannelmixer=aa={opa}")
             
         en = f"enable='between(t,{st},{ed})'"
@@ -651,15 +684,15 @@ class WatermarkApp:
         elif wm_eff == "Fly In (R)":
             wm_x = f"'if(lt(t,{st}+{d}), W+(t-{st})/{d}*({target_x}-W), {target_x})'"
 
-        spd = float(self.speed_var.get().split('x')[0])
+        spd = cfg["spd"]
         # Force constant 30 FPS to avoid "strange FPS" issues on iPhone/Android
         v_flt_base = f"setpts={1/spd}*PTS"
         
-        v_eff = self.v_fade_var.get()
+        v_eff = cfg["v_fade"]
         if v_eff == "Fade In" or v_eff == "Both": v_flt_base += ",fade=t=in:st=0:d=1"
         if (v_eff == "Fade Out" or v_eff == "Both") and vid_dur > 0: v_flt_base += f",fade=t=out:st={vid_dur-1}:d=1"
 
-        v_orig, v_bgm = self.orig_vol_var.get()/100.0, self.bgm_vol_var.get()/100.0
+        v_orig, v_bgm = cfg["orig_vol"]/100.0, cfg["bgm_vol"]/100.0
         
         tmp_s = spd
         tempo_f = []
@@ -668,8 +701,8 @@ class WatermarkApp:
         if tmp_s!=1.0: tempo_f.append(f"atempo={tmp_s}")
         a_s = ",".join(tempo_f) if tempo_f else "anull"
 
-        wm_i = 1 if self.watermark_file else -1
-        bg_i = (wm_i+1) if self.bgm_file and wm_i!=-1 else (1 if self.bgm_file else -1)
+        wm_i = 1 if cfg["watermark_file"] else -1
+        bg_i = (wm_i+1) if cfg["bgm_file"] and wm_i!=-1 else (1 if cfg["bgm_file"] else -1)
         
         if wm_i != -1:
             overlay_str = f"overlay=x={wm_x}:y={wm_y}:{en}"
@@ -680,7 +713,7 @@ class WatermarkApp:
         if has_audio:
             # Use a tiny volume instead of absolute 0 to trick the AAC encoder 
             # into maintaining a high bitrate (prevents the 2kb/s issue).
-            v_actual = 0.00001 if self.mute_var.get() else v_orig
+            v_actual = 0.00001 if cfg["mute"] else v_orig
             a_parts.append(f"[0:a]aresample=44100,aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,volume={v_actual},{a_s}[a_orig]")
             mix_inputs.append("[a_orig]")
             
@@ -792,7 +825,21 @@ class WatermarkApp:
             "output_dir": self.output_dir,
             "watermark_file": self.watermark_file,
             "bgm_file": self.bgm_file,
-            "process_selected": self.process_selected_var.get()
+            "process_selected": self.process_selected_var.get(),
+            "position": self.position_var.get(),
+            "custom_x_ratio": self.custom_x_ratio,
+            "custom_y_ratio": self.custom_y_ratio,
+            "scale": self.scale_var.get(),
+            "rotate": self.rotate_var.get(),
+            "wm_start_time": self.wm_start_time_var.get(),
+            "wm_end_time": self.wm_end_time_var.get(),
+            "wm_effect": self.wm_effect_var.get(),
+            "opacity": self.opacity_var.get(),
+            "v_fade": self.v_fade_var.get(),
+            "orig_vol": self.orig_vol_var.get(),
+            "bgm_vol": self.bgm_vol_var.get(),
+            "mute": self.mute_var.get(),
+            "parallel_videos": self.parallel_videos_var.get()
         }
         
         if settings["process_selected"]:
@@ -808,56 +855,90 @@ class WatermarkApp:
         self.btn_start.config(state="disabled"); self.progress_var.set(0)
         threading.Thread(target=self.process_videos, args=(settings,), daemon=True).start()
 
-    def process_videos(self, cfg):
+    def process_single_video(self, cfg, path):
         exe = cfg["exe"]
         spd = cfg["spd"]
+        fname = os.path.basename(path)
+
+        cap = cv2.VideoCapture(path)
+        fps_v = cap.get(cv2.CAP_PROP_FPS) or 30
+        dur_raw = cap.get(cv2.CAP_PROP_FRAME_COUNT)/fps_v if fps_v > 0 else 1
+        cap.release()
+
+        has_audio = self.check_has_audio(path)
+        f_v, f_a = self.get_ffmpeg_complex_filter_str(dur_raw/spd, has_audio=has_audio, cfg=cfg)
+
+        name, ext = os.path.splitext(fname)
+        out_ext = ext if cfg["format"] == "Original" else f".{cfg['format'].lower()}"
+        out = os.path.join(cfg["output_dir"], f"watermarked_{name}{out_ext}")
+        crf = {"Low (Smaller File)": "28", "Medium (Balanced)": "23"}.get(cfg["quality"], "18")
+
+        cmd = [exe, "-y", "-i", path]
+        if cfg["watermark_file"]:
+            ext_wm = os.path.splitext(cfg["watermark_file"])[1].lower()
+            if ext_wm in ['.png', '.jpg', '.jpeg']:
+                cmd.extend(["-loop", "1", "-framerate", "30", "-i", cfg["watermark_file"]])
+            else:
+                cmd.extend(["-i", cfg["watermark_file"]])
+
+        if cfg["bgm_file"]:
+            cmd.extend(["-stream_loop", "-1", "-i", cfg["bgm_file"]])
+
+        target_dur = dur_raw / spd
+        cmd.extend(["-filter_complex", f"{f_v};{f_a}", "-map", "[v]", "-map", "[a]", "-t", f"{target_dur}", "-c:v", "libx264", "-profile:v", "high", "-level", "4.1", "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-crf", crf, "-preset", "fast", "-c:a", "aac", "-b:a", "128k", "-ar", "44100", out])
+
+        si = subprocess.STARTUPINFO() if os.name == 'nt' else None
+        if si:
+            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+
+        result = subprocess.run(cmd, startupinfo=si, capture_output=True, text=True, encoding='utf-8', errors='replace')
+        if result.returncode != 0:
+            raise Exception(result.stderr)
+
+        return fname
+
+    def process_videos(self, cfg):
         total = len(cfg["files"])
-        
-        for i, path in enumerate(cfg["files"]):
-            fname = os.path.basename(path)
-            self.root.after(0, lambda n=fname, idx=i+1: self.lbl_status.config(text=f"Processing ({idx}/{total}): {n}", fg="orange"))
-            
-            cap = cv2.VideoCapture(path)
-            fps_v = cap.get(cv2.CAP_PROP_FPS) or 30
-            dur_raw = cap.get(cv2.CAP_PROP_FRAME_COUNT)/fps_v if fps_v>0 else 1
-            cap.release()
-            
-            has_audio = self.check_has_audio(path)
-            f_v, f_a = self.get_ffmpeg_complex_filter_str(dur_raw/spd, has_audio=has_audio)
-            
-            name, ext = os.path.splitext(fname)
-            out_ext = ext if cfg["format"]=="Original" else f".{cfg['format'].lower()}"
-            out = os.path.join(cfg["output_dir"], f"watermarked_{name}{out_ext}")
-            crf = {"Low (Smaller File)":"28", "Medium (Balanced)":"23"}.get(cfg["quality"], "18")
-            
-            cmd = [exe, "-y", "-i", path]
-            if cfg["watermark_file"]:
-                ext_wm = os.path.splitext(cfg["watermark_file"])[1].lower()
-                if ext_wm in ['.png', '.jpg', '.jpeg']:
-                    cmd.extend(["-loop", "1", "-framerate", "30", "-i", cfg["watermark_file"]])
-                else:
-                    cmd.extend(["-i", cfg["watermark_file"]])
-            
-            if cfg["bgm_file"]: cmd.extend(["-stream_loop", "-1", "-i", cfg["bgm_file"]])
-            
-            target_dur = dur_raw / spd
-            cmd.extend(["-filter_complex", f"{f_v};{f_a}", "-map", "[v]", "-map", "[a]", "-t", f"{target_dur}", "-c:v", "libx264", "-profile:v", "high", "-level", "4.1", "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-crf", crf, "-preset", "fast", "-c:a", "aac", "-b:a", "128k", "-ar", "44100", out])
-            
-            si = subprocess.STARTUPINFO() if os.name=='nt' else None
-            if si: si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-            
-            try:
-                # Capture stderr for better error reporting - fix Unicode issues
-                result = subprocess.run(cmd, startupinfo=si, capture_output=True, text=True, encoding='utf-8', errors='replace')
-                if result.returncode != 0:
-                    raise Exception(result.stderr)
-            except Exception as e:
-                self.root.after(0, lambda err=str(e): messagebox.showerror("Processing Error", f"FFmpeg failed: {err}"))
-                continue
-                
-            self.root.after(0, lambda p=((i+1)/total)*100: self.progress_var.set(p))
-            
-        self.root.after(0, lambda: (self.lbl_status.config(text="Completed!", fg="green"), self.btn_start.config(state="normal"), self.open_output_dir(), messagebox.showinfo("Success", "Batch processing finished. Output folder opened.")))
+        selected_parallel = str(cfg.get("parallel_videos", self.get_auto_parallel_label()))
+        if selected_parallel.startswith("Auto"):
+            max_workers = min(total, self.get_auto_parallel_count())
+        else:
+            max_workers = min(total, max(1, int(selected_parallel)))
+        completed = 0
+        failed = []
+
+        self.root.after(0, lambda: self.lbl_status.config(text=f"Processing {total} video(s), up to {max_workers} videos in parallel...", fg="orange"))
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_map = {executor.submit(self.process_single_video, cfg, path): path for path in cfg["files"]}
+
+            for future in as_completed(future_map):
+                path = future_map[future]
+                fname = os.path.basename(path)
+                try:
+                    future.result()
+                except Exception as e:
+                    failed.append((fname, str(e)))
+
+                completed += 1
+                progress = (completed / total) * 100
+                self.root.after(0, lambda p=progress, done=completed, n=total, name=fname: (
+                    self.progress_var.set(p),
+                    self.lbl_status.config(text=f"Completed {done}/{n}: {name}", fg="orange")
+                ))
+
+        def finish():
+            self.btn_start.config(state="normal")
+            if failed:
+                self.lbl_status.config(text=f"Completed with errors ({total-len(failed)}/{total})", fg="red")
+                err_list = "\n\n".join(f"{name}\n{err}" for name, err in failed)
+                messagebox.showerror("Processing Error", f"Some videos failed:\n\n{err_list}")
+            else:
+                self.lbl_status.config(text="Completed!", fg="green")
+                self.open_output_dir()
+                messagebox.showinfo("Success", "Batch processing finished. Output folder opened.")
+
+        self.root.after(0, finish)
 
     def fmt_time(self, s): mins, secs = int(max(0,s)//60), int(max(0,s)%60); return f"{mins:02d}:{secs:02d}"
 
@@ -911,6 +992,7 @@ class WatermarkApp:
         except: pass
         self.font_var.set("Arial")
         self.mute_var.set(False)
+        self.parallel_videos_var.set(self.get_auto_parallel_label())
         self.lbl_status.config(text="Ready", fg="blue")
         self.progress_var.set(0)
         if self.video_cap: self.video_cap.release(); self.video_cap = None
