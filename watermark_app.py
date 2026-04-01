@@ -11,6 +11,7 @@ import imageio_ffmpeg
 import cv2
 from PIL import Image, ImageTk, ImageDraw, ImageFont
 import tempfile
+import fractions
 
 class WatermarkApp:
     def __init__(self, root):
@@ -61,6 +62,10 @@ class WatermarkApp:
         self.preview_bg_img = None
         self.process_selected_var = tk.BooleanVar(value=False)
         self.parallel_videos_var = tk.StringVar()
+        self.encoder_var = tk.StringVar(value="Auto (Recommended)")
+        self.encode_speed_var = tk.StringVar(value="Very Fast (Recommended)")
+        self._ffmpeg_encoder_cache = {}
+        self._video_metadata_cache = {}
         
         self.config_path = os.path.join(os.path.dirname(__file__), "config.json")
         self.history_wm = []
@@ -90,6 +95,190 @@ class WatermarkApp:
         count = self.get_auto_parallel_count()
         suffix = "video" if count == 1 else "videos"
         return f"Auto ({count} {suffix})"
+
+    def get_auto_parallel_label_for_cfg(self, cfg):
+        count = self.get_auto_parallel_count_for_cfg(cfg)
+        suffix = "video" if count == 1 else "videos"
+        return f"Auto ({count} {suffix})"
+
+    def refresh_parallel_videos_ui(self, *_):
+        if not hasattr(self, "parallel_videos_cb"):
+            return
+        auto_label = self.get_auto_parallel_label_for_cfg({
+            "exe": imageio_ffmpeg.get_ffmpeg_exe(),
+            "encoder": self.encoder_var.get()
+        })
+        self.parallel_videos_cb.configure(values=[auto_label, "1", "2", "3", "4"])
+        if str(self.parallel_videos_var.get()).startswith("Auto"):
+            self.parallel_videos_var.set(auto_label)
+
+    def should_use_nvenc(self, exe, encoder_pref):
+        nvenc_supported = self.has_ffmpeg_encoder(exe, "h264_nvenc")
+        return nvenc_supported and encoder_pref in [
+            "Auto (Recommended)",
+            "Auto",
+            "NVIDIA GPU (Fastest, if supported)",
+            "NVIDIA NVENC"
+        ]
+
+    def get_auto_parallel_count_for_cfg(self, cfg):
+        cpu_count = os.cpu_count() or 2
+        exe = cfg.get("exe", imageio_ffmpeg.get_ffmpeg_exe())
+        encoder_pref = cfg.get("encoder", "Auto (Recommended)")
+        if self.should_use_nvenc(exe, encoder_pref):
+            return max(1, min(4, cpu_count))
+        return max(1, min(4, cpu_count // 2))
+
+    def get_ffmpeg_thread_count(self, cfg, max_parallel):
+        cpu_count = os.cpu_count() or 2
+        exe = cfg.get("exe", imageio_ffmpeg.get_ffmpeg_exe())
+        encoder_pref = cfg.get("encoder", "Auto (Recommended)")
+        if self.should_use_nvenc(exe, encoder_pref):
+            return max(1, min(4, cpu_count // max(1, max_parallel)))
+        return max(1, cpu_count // max(1, max_parallel))
+
+    def has_ffmpeg_encoder(self, exe, encoder_name):
+        cache_key = (exe, encoder_name)
+        if cache_key in self._ffmpeg_encoder_cache:
+            return self._ffmpeg_encoder_cache[cache_key]
+
+        try:
+            res = subprocess.run([exe, "-hide_banner", "-encoders"], capture_output=True, text=True, encoding='utf-8', errors='replace')
+            text = f"{res.stdout}\n{res.stderr}"
+            supported = encoder_name in text
+        except Exception:
+            supported = False
+
+        self._ffmpeg_encoder_cache[cache_key] = supported
+        return supported
+
+    def get_ffprobe_exe(self, ffmpeg_exe):
+        ffprobe_exe = ffmpeg_exe.replace("ffmpeg", "ffprobe")
+        return ffprobe_exe if os.path.exists(ffprobe_exe) else ""
+
+    def probe_video_metadata(self, path, ffmpeg_exe=None):
+        cache_key = (path, ffmpeg_exe or "")
+        if cache_key in self._video_metadata_cache:
+            return dict(self._video_metadata_cache[cache_key])
+
+        meta = {"fps": 30.0, "duration": 1.0, "has_audio": False}
+        ffprobe_exe = self.get_ffprobe_exe(ffmpeg_exe) if ffmpeg_exe else ""
+
+        if ffprobe_exe:
+            try:
+                cmd = [
+                    ffprobe_exe,
+                    "-v", "error",
+                    "-print_format", "json",
+                    "-show_streams",
+                    "-show_format",
+                    path
+                ]
+                res = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='replace')
+                if res.returncode == 0 and res.stdout.strip():
+                    data = json.loads(res.stdout)
+                    streams = data.get("streams", [])
+                    format_info = data.get("format", {})
+                    video_stream = next((s for s in streams if s.get("codec_type") == "video"), None)
+                    audio_stream = next((s for s in streams if s.get("codec_type") == "audio"), None)
+
+                    if video_stream:
+                        fps_raw = video_stream.get("avg_frame_rate") or video_stream.get("r_frame_rate") or "30/1"
+                        try:
+                            fps_val = float(fractions.Fraction(fps_raw))
+                            if fps_val > 0:
+                                meta["fps"] = fps_val
+                        except Exception:
+                            pass
+
+                        dur_candidates = [
+                            video_stream.get("duration"),
+                            format_info.get("duration")
+                        ]
+                        for dur in dur_candidates:
+                            try:
+                                dur_val = float(dur)
+                                if dur_val > 0:
+                                    meta["duration"] = dur_val
+                                    break
+                            except Exception:
+                                pass
+
+                    meta["has_audio"] = audio_stream is not None
+                    self._video_metadata_cache[cache_key] = dict(meta)
+                    return dict(meta)
+            except Exception:
+                pass
+
+        cap = cv2.VideoCapture(path)
+        fps_v = cap.get(cv2.CAP_PROP_FPS) or 30
+        frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+        cap.release()
+        if fps_v > 0:
+            meta["fps"] = fps_v
+        if fps_v > 0 and frame_count > 0:
+            meta["duration"] = frame_count / fps_v
+
+        if ffmpeg_exe:
+            meta["has_audio"] = self.check_has_audio(path, ffmpeg_exe)
+        else:
+            meta["has_audio"] = self.check_has_audio(path)
+
+        self._video_metadata_cache[cache_key] = dict(meta)
+        return dict(meta)
+
+    def build_video_codec_args(self, exe, cfg, crf, preview_mode=False):
+        encoder_pref = cfg.get("encoder", "Auto (Recommended)")
+        speed_pref = cfg.get("encode_speed", "Very Fast (Recommended)")
+
+        cpu_preset_map = {
+            "Fast (better quality)": "fast",
+            "Very Fast (Recommended)": "veryfast",
+            "Super Fast (faster, larger file)": "superfast",
+            "Ultra Fast (fastest, lower quality)": "ultrafast",
+            "Fast": "fast",
+            "Very Fast": "veryfast",
+            "Super Fast": "superfast",
+            "Ultra Fast": "ultrafast",
+        }
+        nvenc_preset_map = {
+            "Fast (better quality)": "p4",
+            "Very Fast (Recommended)": "p3",
+            "Super Fast (faster, larger file)": "p2",
+            "Ultra Fast (fastest, lower quality)": "p1",
+            "Fast": "p4",
+            "Very Fast": "p3",
+            "Super Fast": "p2",
+            "Ultra Fast": "p1",
+        }
+
+        use_nvenc = self.should_use_nvenc(exe, encoder_pref)
+        if use_nvenc:
+            nvenc_preset = nvenc_preset_map.get(speed_pref, "p3")
+            return ["-c:v", "h264_nvenc", "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-cq", crf, "-preset", nvenc_preset]
+
+        cpu_preset = "ultrafast" if preview_mode else cpu_preset_map.get(speed_pref, "veryfast")
+        return ["-c:v", "libx264", "-profile:v", "high", "-level", "4.1", "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-crf", crf, "-preset", cpu_preset]
+
+    def can_copy_audio(self, cfg, has_audio):
+        if not has_audio:
+            return False
+        if cfg.get("bgm_file"):
+            return False
+        if cfg.get("mute"):
+            return False
+        if abs(float(cfg.get("spd", 1.0)) - 1.0) > 0.0001:
+            return False
+        if abs(float(cfg.get("orig_vol", 100)) - 100.0) > 0.0001:
+            return False
+        return True
+
+    def needs_video_filter(self, cfg):
+        if cfg.get("watermark_file"):
+            return True
+        if abs(float(cfg.get("spd", 1.0)) - 1.0) > 0.0001:
+            return True
+        return cfg.get("v_fade", "None") not in ["None", "", None]
 
     def setup_ui(self):
         style = ttk.Style(self.root)
@@ -161,6 +350,14 @@ class WatermarkApp:
 
         ttk.Label(frame_v_cfg, text="Fade:").grid(row=3, column=0, sticky="w", pady=2)
         ttk.Combobox(frame_v_cfg, textvariable=self.v_fade_var, values=["None", "Fade In", "Fade Out", "Both"], state="readonly").grid(row=3, column=1, sticky="ew", padx=10)
+
+        ttk.Label(frame_v_cfg, text="Encoder:").grid(row=4, column=0, sticky="w", pady=2)
+        self.encoder_cb = ttk.Combobox(frame_v_cfg, textvariable=self.encoder_var, values=["Auto (Recommended)", "CPU Only (More compatible)", "NVIDIA GPU (Fastest, if supported)"], state="readonly")
+        self.encoder_cb.grid(row=4, column=1, sticky="ew", padx=10)
+        self.encoder_cb.bind("<<ComboboxSelected>>", self.refresh_parallel_videos_ui)
+
+        ttk.Label(frame_v_cfg, text="Encode Speed:").grid(row=5, column=0, sticky="w", pady=2)
+        ttk.Combobox(frame_v_cfg, textvariable=self.encode_speed_var, values=["Fast (better quality)", "Very Fast (Recommended)", "Super Fast (faster, larger file)", "Ultra Fast (fastest, lower quality)"], state="readonly").grid(row=5, column=1, sticky="ew", padx=10)
 
         frame_out = tk.Frame(frame_video_group, pady=5)
         frame_out.pack(fill="x")
@@ -316,9 +513,9 @@ class WatermarkApp:
         parallel_box = tk.Frame(frame_actions)
         parallel_box.pack(fill="x", pady=(0, 5))
         ttk.Label(parallel_box, text="Parallel Videos:").pack(side="left")
-        self.parallel_videos_cb = ttk.Combobox(parallel_box, textvariable=self.parallel_videos_var, values=[self.get_auto_parallel_label(), "1", "2", "3", "4"], state="readonly", width=16)
+        self.parallel_videos_cb = ttk.Combobox(parallel_box, textvariable=self.parallel_videos_var, values=[self.get_auto_parallel_label_for_cfg({"exe": imageio_ffmpeg.get_ffmpeg_exe(), "encoder": self.encoder_var.get()}), "1", "2", "3", "4"], state="readonly", width=16)
         self.parallel_videos_cb.pack(side="right")
-        self.parallel_videos_var.set(self.get_auto_parallel_label())
+        self.parallel_videos_var.set(self.get_auto_parallel_label_for_cfg({"exe": imageio_ffmpeg.get_ffmpeg_exe(), "encoder": self.encoder_var.get()}))
 
         self.btn_start = ttk.Button(frame_actions, text="🚀 START PROCESS", command=self.start_processing)
         self.btn_start.pack(fill="x", ipady=10)
@@ -586,16 +783,15 @@ class WatermarkApp:
         if not os.path.exists(tmp): os.makedirs(tmp)
         out = os.path.join(tmp, "preview_sample.mp4")
 
-        cap = cv2.VideoCapture(path)
-        fps = cap.get(cv2.CAP_PROP_FPS) or 30
+        meta = self.probe_video_metadata(path, exe)
+        fps = meta["fps"] or 30
         spd = float(self.speed_var.get().split('x')[0])
-        raw_dur = (cap.get(cv2.CAP_PROP_FRAME_COUNT)/fps) if fps>0 else 10
-        cap.release()
+        raw_dur = meta["duration"] if meta["duration"] > 0 else 10
         
         # In preview we only render 10s. If original is longer, fade out won't show unless we cap it.
         dur_v = min(10.0, raw_dur / spd)
         
-        has_audio = self.check_has_audio(path)
+        has_audio = meta["has_audio"]
         v_f, a_f = self.get_ffmpeg_complex_filter_str(dur_v, has_audio=has_audio)
         cmd = [exe, "-y", "-i", path]
         if self.watermark_file:
@@ -605,7 +801,10 @@ class WatermarkApp:
             else:
                 cmd.extend(["-i", self.watermark_file])
         if self.bgm_file: cmd.extend(["-stream_loop", "-1", "-i", self.bgm_file])
-        cmd.extend(["-filter_complex", f"{v_f};{a_f}", "-map", "[v]", "-map", "[a]", "-t", "10", "-shortest", "-c:v", "libx264", "-profile:v", "high", "-pix_fmt", "yuv420p", "-preset", "ultrafast", "-c:a", "aac", "-b:a", "128k", "-ar", "44100", out])
+        preview_cfg = {"encoder": self.encoder_var.get(), "encode_speed": "Ultra Fast (fastest, lower quality)"}
+        cmd.extend(["-filter_complex", f"{v_f};{a_f}", "-map", "[v]", "-map", "[a]", "-t", "10", "-shortest"])
+        cmd.extend(self.build_video_codec_args(exe, preview_cfg, "28", preview_mode=True))
+        cmd.extend(["-c:a", "aac", "-b:a", "128k", "-ar", "44100", out])
         si = subprocess.STARTUPINFO() if os.name=='nt' else None
         if si: si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         try:
@@ -798,8 +997,8 @@ class WatermarkApp:
             self.output_dir=d
             self.lbl_output.config(text=d, fg="black")
             self.save_config()
-    def check_has_audio(self, path):
-        exe = imageio_ffmpeg.get_ffmpeg_exe()
+    def check_has_audio(self, path, exe=None):
+        exe = exe or imageio_ffmpeg.get_ffmpeg_exe()
         # Fast probe using ffmpeg
         cmd = [exe, "-hide_banner", "-i", path]
         try:
@@ -825,6 +1024,8 @@ class WatermarkApp:
             "output_dir": self.output_dir,
             "watermark_file": self.watermark_file,
             "bgm_file": self.bgm_file,
+            "encoder": self.encoder_var.get(),
+            "encode_speed": self.encode_speed_var.get(),
             "process_selected": self.process_selected_var.get(),
             "position": self.position_var.get(),
             "custom_x_ratio": self.custom_x_ratio,
@@ -841,6 +1042,7 @@ class WatermarkApp:
             "mute": self.mute_var.get(),
             "parallel_videos": self.parallel_videos_var.get()
         }
+        settings["auto_parallel_count"] = self.get_auto_parallel_count_for_cfg(settings)
         
         if settings["process_selected"]:
             sel = self.listbox_videos.curselection()
@@ -859,21 +1061,21 @@ class WatermarkApp:
         exe = cfg["exe"]
         spd = cfg["spd"]
         fname = os.path.basename(path)
+        ffmpeg_threads = max(1, int(cfg.get("ffmpeg_threads", 1)))
 
-        cap = cv2.VideoCapture(path)
-        fps_v = cap.get(cv2.CAP_PROP_FPS) or 30
-        dur_raw = cap.get(cv2.CAP_PROP_FRAME_COUNT)/fps_v if fps_v > 0 else 1
-        cap.release()
-
-        has_audio = self.check_has_audio(path)
-        f_v, f_a = self.get_ffmpeg_complex_filter_str(dur_raw/spd, has_audio=has_audio, cfg=cfg)
+        meta = self.probe_video_metadata(path, exe)
+        dur_raw = meta["duration"] if meta["duration"] > 0 else 1
+        has_audio = meta["has_audio"]
+        copy_audio = self.can_copy_audio(cfg, has_audio)
+        needs_video_filter = self.needs_video_filter(cfg)
+        f_v, f_a = self.get_ffmpeg_complex_filter_str(dur_raw/spd, has_audio=(has_audio and not copy_audio), cfg=cfg)
 
         name, ext = os.path.splitext(fname)
         out_ext = ext if cfg["format"] == "Original" else f".{cfg['format'].lower()}"
         out = os.path.join(cfg["output_dir"], f"watermarked_{name}{out_ext}")
         crf = {"Low (Smaller File)": "28", "Medium (Balanced)": "23"}.get(cfg["quality"], "18")
 
-        cmd = [exe, "-y", "-i", path]
+        cmd = [exe, "-y", "-threads", str(ffmpeg_threads), "-i", path]
         if cfg["watermark_file"]:
             ext_wm = os.path.splitext(cfg["watermark_file"])[1].lower()
             if ext_wm in ['.png', '.jpg', '.jpeg']:
@@ -885,7 +1087,28 @@ class WatermarkApp:
             cmd.extend(["-stream_loop", "-1", "-i", cfg["bgm_file"]])
 
         target_dur = dur_raw / spd
-        cmd.extend(["-filter_complex", f"{f_v};{f_a}", "-map", "[v]", "-map", "[a]", "-t", f"{target_dur}", "-c:v", "libx264", "-profile:v", "high", "-level", "4.1", "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-crf", crf, "-preset", "fast", "-c:a", "aac", "-b:a", "128k", "-ar", "44100", out])
+        filter_parts = []
+        if needs_video_filter:
+            filter_parts.append(f_v)
+        if not copy_audio:
+            filter_parts.append(f_a)
+        if filter_parts:
+            cmd.extend(["-filter_complex", ";".join(filter_parts)])
+
+        if needs_video_filter:
+            cmd.extend(["-map", "[v]"])
+        else:
+            cmd.extend(["-map", "0:v:0"])
+        if copy_audio:
+            cmd.extend(["-map", "0:a?"])
+        else:
+            cmd.extend(["-map", "[a]"])
+        cmd.extend(["-t", f"{target_dur}"])
+        cmd.extend(self.build_video_codec_args(exe, cfg, crf))
+        if copy_audio:
+            cmd.extend(["-c:a", "copy", out])
+        else:
+            cmd.extend(["-c:a", "aac", "-b:a", "128k", "-ar", "44100", out])
 
         si = subprocess.STARTUPINFO() if os.name == 'nt' else None
         if si:
@@ -901,9 +1124,11 @@ class WatermarkApp:
         total = len(cfg["files"])
         selected_parallel = str(cfg.get("parallel_videos", self.get_auto_parallel_label()))
         if selected_parallel.startswith("Auto"):
-            max_workers = min(total, self.get_auto_parallel_count())
+            max_workers = min(total, int(cfg.get("auto_parallel_count", self.get_auto_parallel_count_for_cfg(cfg))))
         else:
             max_workers = min(total, max(1, int(selected_parallel)))
+        cfg = dict(cfg)
+        cfg["ffmpeg_threads"] = self.get_ffmpeg_thread_count(cfg, max_workers)
         completed = 0
         failed = []
 
@@ -955,12 +1180,38 @@ class WatermarkApp:
                     if last_f: self.font_var.set(last_f)
                     tc = data.get("text_color", "#FFFFFF")
                     self.text_color_var.set(tc)
+                    encoder_val = data.get("encoder", "Auto (Recommended)")
+                    speed_val = data.get("encode_speed", "Very Fast (Recommended)")
+                    if encoder_val == "Auto":
+                        encoder_val = "Auto (Recommended)"
+                    elif encoder_val == "CPU (libx264)":
+                        encoder_val = "CPU Only (More compatible)"
+                    elif encoder_val == "NVIDIA NVENC":
+                        encoder_val = "NVIDIA GPU (Fastest, if supported)"
+                    if speed_val == "Fast":
+                        speed_val = "Fast (better quality)"
+                    elif speed_val == "Very Fast":
+                        speed_val = "Very Fast (Recommended)"
+                    elif speed_val == "Super Fast":
+                        speed_val = "Super Fast (faster, larger file)"
+                    elif speed_val == "Ultra Fast":
+                        speed_val = "Ultra Fast (fastest, lower quality)"
+                    self.encoder_var.set(encoder_val)
+                    self.encode_speed_var.set(speed_val)
+                    self.refresh_parallel_videos_ui()
                     try: self.lbl_color_box.config(bg=tc)
                     except: pass
             except: pass
 
     def save_config(self):
-        data = {"output_dir": self.output_dir, "history_wm": self.history_wm, "font_family": self.font_var.get(), "text_color": self.text_color_var.get()}
+        data = {
+            "output_dir": self.output_dir,
+            "history_wm": self.history_wm,
+            "font_family": self.font_var.get(),
+            "text_color": self.text_color_var.get(),
+            "encoder": self.encoder_var.get(),
+            "encode_speed": self.encode_speed_var.get()
+        }
         try:
             with open(self.config_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=4)
@@ -975,6 +1226,8 @@ class WatermarkApp:
         self.format_var.set("Original")
         self.quality_var.set("Medium (Balanced)")
         self.speed_var.set("1x (Normal)")
+        self.encoder_var.set("Auto (Recommended)")
+        self.encode_speed_var.set("Very Fast (Recommended)")
         self.v_fade_var.set("None")
         self.position_var.set("Bottom Right")
         self.scale_var.set(100)
@@ -992,7 +1245,7 @@ class WatermarkApp:
         except: pass
         self.font_var.set("Arial")
         self.mute_var.set(False)
-        self.parallel_videos_var.set(self.get_auto_parallel_label())
+        self.refresh_parallel_videos_ui()
         self.lbl_status.config(text="Ready", fg="blue")
         self.progress_var.set(0)
         if self.video_cap: self.video_cap.release(); self.video_cap = None

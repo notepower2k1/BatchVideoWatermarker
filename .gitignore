@@ -7,3 +7,5 @@ watermark_app_temp_text.png
 /build
 /dist
 /*.spec
+__pycache__/
+*.py[cod]
